@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/main-menu",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/entry",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/gameplay",
+      "destination": "/index.html"
+    }
+  ]
+}
