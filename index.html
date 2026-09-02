@@ -6,9 +6,45 @@
     <meta name="theme-color" content="#020611" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <title>Galaga Skill Wager</title>
+    <style>
+      html,body,#app{margin:0;min-width:100%;min-height:100%;background:#020611}
+      body{overflow:hidden}
+      .startup-loader{position:fixed;inset:0;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,#0b2340 0,#050c1b 36%,#020611 72%);color:#e9fbff;font-family:Arial,Helvetica,sans-serif;isolation:isolate}
+      .startup-loader::before,.startup-loader::after{content:"";position:absolute;inset:-20%;pointer-events:none}
+      .startup-loader::before{background-image:radial-gradient(circle,#8fe8ff 0 1px,transparent 1.5px),radial-gradient(circle,#fff 0 1px,transparent 1.4px);background-size:72px 72px,119px 119px;background-position:0 0,27px 41px;opacity:.32;animation:bootStars 11s linear infinite}
+      .startup-loader::after{inset:auto 8% 8%;height:1px;background:linear-gradient(90deg,transparent,#56d8ff,transparent);box-shadow:0 0 22px #33c7ff;opacity:.5}
+      .startup-loader-core{position:relative;z-index:2;width:min(560px,82vw);text-align:center}
+      .startup-loader-kicker{margin-bottom:8px;color:#78ddff;font-size:11px;font-weight:800;letter-spacing:.42em}
+      .startup-loader-title{font-size:clamp(42px,9vw,88px);font-weight:1000;line-height:.95;letter-spacing:.08em;text-shadow:0 0 10px #7ce9ff,0 0 32px rgba(69,197,255,.72)}
+      .startup-loader-orbit{position:relative;width:94px;height:94px;margin:24px auto 20px;border:1px solid rgba(107,224,255,.25);border-radius:50%;box-shadow:inset 0 0 26px rgba(45,179,255,.12)}
+      .startup-loader-orbit::before,.startup-loader-orbit::after{content:"";position:absolute;border-radius:50%;border:1px solid rgba(103,218,255,.45)}
+      .startup-loader-orbit::before{inset:11px;border-left-color:transparent;animation:bootSpin 1.8s linear infinite}
+      .startup-loader-orbit::after{inset:24px;border-right-color:transparent;animation:bootSpin 1.15s linear infinite reverse}
+      .startup-loader-orbit i{position:absolute;left:50%;top:50%;width:5px;height:5px;margin:-2.5px;border-radius:50%;background:#bff6ff;box-shadow:0 0 14px #56dcff}
+      .startup-loader-orbit i:nth-child(1){transform:translate(-42px,0)}.startup-loader-orbit i:nth-child(2){transform:translate(37px,-10px)}.startup-loader-orbit i:nth-child(3){transform:translate(0,39px)}
+      .startup-loader-orbit b{position:absolute;inset:36px;border-radius:50%;background:#9cf0ff;box-shadow:0 0 18px #5bdcff,0 0 42px rgba(41,175,255,.9);animation:bootPulse .9s ease-in-out infinite alternate}
+      .startup-loader-copy{min-height:16px;margin-bottom:10px;color:#9cc9d7;font-size:11px;font-weight:800;letter-spacing:.2em}
+      .startup-loader-track{height:9px;padding:2px;border:1px solid rgba(101,222,255,.48);background:rgba(3,14,30,.82);clip-path:polygon(8px 0,100% 0,calc(100% - 8px) 100%,0 100%)}
+      .startup-loader-track span{display:block;width:0;height:100%;background:linear-gradient(90deg,#1f89cf,#67e3ff,#d3fbff);box-shadow:0 0 14px rgba(77,218,255,.85);transition:width .18s ease-out}
+      .startup-loader-meta{display:flex;justify-content:space-between;align-items:center;margin-top:9px;color:#7196a5;font-size:10px;font-weight:800;letter-spacing:.14em}
+      .startup-loader-meta strong{color:#d8f9ff;font-size:13px}
+      @keyframes bootSpin{to{transform:rotate(360deg)}}@keyframes bootPulse{to{transform:scale(1.22);opacity:.72}}@keyframes bootStars{to{transform:translate3d(-34px,54px,0)}}
+      @media (prefers-reduced-motion:reduce){.startup-loader::before,.startup-loader-orbit::before,.startup-loader-orbit::after,.startup-loader-orbit b{animation:none!important}}
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <main class="startup-loader" data-startup-loader role="status" aria-live="polite">
+        <div class="startup-loader-core">
+          <div class="startup-loader-kicker">SYSTEM BOOT</div>
+          <div class="startup-loader-title" aria-label="Galaga">GALAGA</div>
+          <div class="startup-loader-orbit" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
+          <div class="startup-loader-copy" data-loading-status>INITIALIZING ASSET CACHE</div>
+          <div class="startup-loader-track" aria-hidden="true"><span data-loading-bar></span></div>
+          <div class="startup-loader-meta"><strong data-loading-percent>0%</strong><span data-loading-count>0 / --</span></div>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

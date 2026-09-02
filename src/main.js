@@ -194,6 +194,202 @@ let bombDoubleTapAt = 0;
 let bombDoubleTapTarget = null;
 const BOMB_DOUBLE_TAP_WINDOW_MS = 460;
 
+
+// Startup preloader: load every main-menu visual plus most gameplay/UI assets before
+// the first interactive screen is rendered. Advanced boss variants continue in the
+// background after boot so the menu appears as soon as the essential cache is ready.
+const STARTUP_ASSETS = Object.freeze([
+  '/assets/mainmenu/background-landscape-clean.png',
+  '/assets/mainmenu/background-landscape.png',
+  '/assets/mainmenu/background-portrait.png',
+  '/assets/mainmenu/fleet/ship-main-blue.png',
+  '/assets/mainmenu/fleet/ship-left-orange.png',
+  '/assets/mainmenu/fleet/ship-left-purple.png',
+  '/assets/mainmenu/fleet/ship-right-orange.png',
+  '/assets/mainmenu/fleet/ship-right-purple.png',
+  '/assets/mainmenu/play-button.png',
+  '/assets/gameplay/background-landscape.png',
+  '/assets/gameplay/background-portrait.png',
+  '/assets/gameplay/hud.png',
+  '/assets/ui/panel-button-blue.png',
+  '/assets/ui/panel-button-red.png',
+  '/assets/ui/panel-entry-blue.png',
+  '/assets/ui/panel-portrait-blue.png',
+  '/assets/ui/panel-square-blue-a.png',
+  '/assets/ui/panel-square-blue-b.png',
+  '/assets/ui/panel-wide-blue.png',
+  '/assets/ui/panel-wide-red.png',
+  '/assets/player/ship.png',
+  '/assets/player/bullet-01.png',
+  '/assets/player/bullet-02.png',
+  '/assets/player/bomb.png',
+  '/assets/player/overdrive.png',
+  '/assets/player/shield.png',
+  '/assets/enemies/Enemy_01_Fighter.png',
+  '/assets/enemies/Enemy_01_Fighter_Bullet_01.png',
+  '/assets/enemies/Enemy_02_Diver.png',
+  '/assets/enemies/Enemy_02_Diver_Bullet_01.png',
+  '/assets/enemies/Enemy_02_Dive_Trail_01.png',
+  '/assets/enemies/Enemy_02_Dive_Warning_01.png',
+  '/assets/enemies/Enemy_03_Shooter.png',
+  '/assets/enemies/Enemy_03_Shooter_Bullet_01.png',
+  '/assets/enemies/Enemy_03_Shooter_ChargedShot_01.png',
+  '/assets/enemies/Enemy_04_Heavy.png',
+  '/assets/enemies/Enemy_04_Heavy_Bullet_01.png',
+  '/assets/enemies/Enemy_05_Charger.png',
+  '/assets/enemies/Enemy_05_Charge_Trail_01.png',
+  '/assets/enemies/Enemy_05_Charge_Impact_01.png',
+  '/assets/enemies/Enemy_06_Elite.png',
+  '/assets/enemies/Enemy_06_Elite_Bullet_01.png',
+  '/assets/enemies/Enemy_06_Elite_Special_Bullet_01.png',
+  '/assets/bosses/MiniBoss_01.png',
+  '/assets/bosses/MiniBoss_Bullet_01.png',
+  '/assets/bosses/MiniBoss_Spread_Bullet_01.png',
+  '/assets/bosses/MiniBoss_Phase2_Aura_01.png',
+  '/assets/bosses/FinalBoss_01.png',
+  '/assets/bosses/FinalBoss_Bullet_01.png',
+  '/assets/bosses/FinalBoss_Spread_Bullet_01.png',
+  '/assets/bosses/FinalBoss_Laser_Telegraph_01.png',
+  '/assets/bosses/FinalBoss_Laser_Beam_01.png',
+  '/assets/vfx/Enemy_Spawn_Effect_01.png',
+  '/assets/vfx/Explosion_Generic_01.png',
+  '/assets/vfx/Hit_Impact_01.png',
+  '/assets/audio/music-main-menu.mp3',
+  '/assets/audio/music-gameplay.mp3',
+  '/assets/audio/sfx-laser.mp3',
+  '/assets/audio/sfx-explosion.mp3',
+  '/assets/audio/sfx-wave-start.mp3',
+  '/assets/audio/sfx-wave-clear.mp3'
+]);
+
+const DEFERRED_ASSETS = Object.freeze([
+  '/assets/bosses/MiniBoss_Alternating_Spread_Bullet_01.png',
+  '/assets/bosses/MiniBoss_Arc_Sweep_Bullet_01.png',
+  '/assets/bosses/MiniBoss_Heavy_Charge_01.png',
+  '/assets/bosses/MiniBoss_Heavy_Projectile_01.png',
+  '/assets/bosses/MiniBoss_Phase2_Transition_01.png',
+  '/assets/bosses/MiniBoss_Target_Reticle_01.png',
+  '/assets/bosses/MiniBoss_TripleAim_Bullet_01.png',
+  '/assets/bosses/MiniBoss_TripleAim_Charge_01.png',
+  '/assets/audio/sfx-coin-spend.mp3',
+  '/assets/audio/sfx-charge-up.mp3',
+  '/assets/audio/sfx-enemy-fire.mp3',
+  '/assets/audio/sfx-enemy-destroy.mp3',
+  '/assets/audio/sfx-dive-flyby.mp3',
+  '/assets/audio/sfx-bomb-blast.mp3'
+]);
+
+const PRELOAD_CONCURRENCY = 6;
+const PRELOAD_TIMEOUT_MS = 20000;
+
+function loadingScreenMarkup() {
+  return `<main class="startup-loader" data-startup-loader role="status" aria-live="polite">
+    <div class="startup-loader-stars" aria-hidden="true"></div>
+    <div class="startup-loader-core">
+      <div class="startup-loader-kicker">SYSTEM BOOT</div>
+      <div class="startup-loader-title" aria-label="Galaga">GALAGA</div>
+      <div class="startup-loader-orbit" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
+      <div class="startup-loader-copy" data-loading-status>INITIALIZING ASSET CACHE</div>
+      <div class="startup-loader-track" aria-hidden="true"><span data-loading-bar></span></div>
+      <div class="startup-loader-meta"><strong data-loading-percent>0%</strong><span data-loading-count>0 / ${STARTUP_ASSETS.length}</span></div>
+    </div>
+  </main>`;
+}
+
+function showLoadingScreen() {
+  if (!app.querySelector('[data-startup-loader]')) app.innerHTML = loadingScreenMarkup();
+  updateLoadingProgress(0, 0, STARTUP_ASSETS.length, 'INITIALIZING ASSET CACHE');
+}
+
+function updateLoadingProgress(percent, completed, total, status = 'LOADING GAME ASSETS') {
+  const safePercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const bar = app.querySelector('[data-loading-bar]');
+  const label = app.querySelector('[data-loading-percent]');
+  const count = app.querySelector('[data-loading-count]');
+  const statusNode = app.querySelector('[data-loading-status]');
+  if (bar) bar.style.width = `${safePercent}%`;
+  if (label) label.textContent = `${safePercent}%`;
+  if (count) count.textContent = `${Math.max(0, Number(completed) || 0)} / ${Math.max(0, Number(total) || 0)}`;
+  if (statusNode) statusNode.textContent = status;
+}
+
+function preloadImage(url) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      image.onload = null;
+      image.onerror = null;
+      resolve({ url, ok });
+    };
+    const timer = window.setTimeout(() => finish(false), PRELOAD_TIMEOUT_MS);
+    image.onload = async () => {
+      if (typeof image.decode === 'function') {
+        try { await image.decode(); } catch {}
+      }
+      finish(true);
+    };
+    image.onerror = () => finish(false);
+    image.decoding = 'async';
+    image.src = url;
+  });
+}
+
+async function preloadBinary(url) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), PRELOAD_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { cache: 'force-cache', signal: controller.signal });
+    if (!response.ok) return { url, ok: false };
+    await response.arrayBuffer();
+    return { url, ok: true };
+  } catch {
+    return { url, ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function preloadOne(url) {
+  return /\.(?:png|jpe?g|webp|gif|svg)(?:\?|$)/i.test(url) ? preloadImage(url) : preloadBinary(url);
+}
+
+async function preloadAssets(urls, { onProgress } = {}) {
+  const assets = [...new Set(urls)];
+  const results = [];
+  let cursor = 0;
+  let completed = 0;
+
+  const worker = async () => {
+    while (cursor < assets.length) {
+      const index = cursor++;
+      const result = await preloadOne(assets[index]);
+      results[index] = result;
+      completed += 1;
+      onProgress?.({ completed, total: assets.length, result });
+    }
+  };
+
+  const workerCount = Math.min(PRELOAD_CONCURRENCY, Math.max(1, assets.length));
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return {
+    total: assets.length,
+    loaded: results.filter((item) => item?.ok).length,
+    failed: results.filter((item) => item && !item.ok).map((item) => item.url)
+  };
+}
+
+function preloadDeferredAssets() {
+  window.setTimeout(() => {
+    preloadAssets(DEFERRED_ASSETS).then((summary) => {
+      if (summary.failed.length) console.warn('Deferred asset preload skipped:', summary.failed);
+    }).catch(() => {});
+  }, 0);
+}
+
 // Phase 7 presentation-only telemetry. This never changes gameplay authority or payout logic.
 const visualTelemetry = {
   score: 0, lives: 3, damageTaken: 0, bossPhase: 0, overdriveActive: false, wave: 1, multiplier: 0
@@ -1084,9 +1280,35 @@ window.addEventListener('popstate', () => {
 });
 
 (async function boot() {
-  render();
-  try {
-    const activeSession = await refreshPlayer();
+  showLoadingScreen();
+
+  // Warm the backend in parallel with asset loading so a Render cold start does not
+  // unnecessarily extend the startup sequence after the asset cache reaches 100%.
+  const playerRequest = refreshPlayer()
+    .then((activeSession) => ({ ok: true, activeSession }))
+    .catch((error) => ({ ok: false, error }));
+
+  const preloadSummary = await preloadAssets(STARTUP_ASSETS, {
+    onProgress: ({ completed, total }) => {
+      const percent = total ? (completed / total) * 100 : 100;
+      const status = completed >= total ? 'ASSETS READY' : 'LOADING GAME ASSETS';
+      updateLoadingProgress(percent, completed, total, status);
+    }
+  });
+
+  if (preloadSummary.failed.length) {
+    console.warn('Startup assets unavailable:', preloadSummary.failed);
+  }
+
+  updateLoadingProgress(100, preloadSummary.total, preloadSummary.total, 'CONNECTING TO GAME SERVER');
+  const playerResult = await playerRequest;
+
+  // Advanced boss/audio files are intentionally non-blocking and continue warming
+  // the browser cache once the first screen is visible.
+  preloadDeferredAssets();
+
+  if (playerResult.ok) {
+    const activeSession = playerResult.activeSession;
     if (devPreviewFromQuery()) return;
 
     // Existing server-authoritative runs always resume into /gameplay.
@@ -1103,10 +1325,11 @@ window.addEventListener('popstate', () => {
       return;
     }
     machine.set(GameState.MENU, { force: true });
-  } catch (error) {
-    model.error = `Backend unavailable: ${error.message}`;
-    if (devPreviewFromQuery()) return;
-    if (initialRouteKind === 'entry') machine.set(GameState.ENTRY_SELECTED, { force: true });
-    else machine.set(GameState.MENU, { force: true });
+    return;
   }
+
+  model.error = `Backend unavailable: ${playerResult.error?.message || 'Unknown error'}`;
+  if (devPreviewFromQuery()) return;
+  if (initialRouteKind === 'entry') machine.set(GameState.ENTRY_SELECTED, { force: true });
+  else machine.set(GameState.MENU, { force: true });
 })();
