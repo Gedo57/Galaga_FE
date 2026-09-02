@@ -284,24 +284,21 @@ const PRELOAD_TIMEOUT_MS = 20000;
 
 function loadingScreenMarkup() {
   return `<main class="startup-loader" data-startup-loader role="status" aria-live="polite">
-    <div class="startup-loader-stars" aria-hidden="true"></div>
     <div class="startup-loader-core">
-      <div class="startup-loader-kicker">SYSTEM BOOT</div>
-      <div class="startup-loader-title" aria-label="Galaga">GALAGA</div>
-      <div class="startup-loader-orbit" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
-      <div class="startup-loader-copy" data-loading-status>INITIALIZING ASSET CACHE</div>
+      <div class="startup-loader-copy" data-loading-status>Loading....</div>
       <div class="startup-loader-track" aria-hidden="true"><span data-loading-bar></span></div>
-      <div class="startup-loader-meta"><strong data-loading-percent>0%</strong><span data-loading-count>0 / ${STARTUP_ASSETS.length}</span></div>
+      <div class="startup-loader-percent" data-loading-percent>0%</div>
+      <div class="startup-loader-count" data-loading-count>0 / ${STARTUP_ASSETS.length}</div>
     </div>
   </main>`;
 }
 
 function showLoadingScreen() {
   if (!app.querySelector('[data-startup-loader]')) app.innerHTML = loadingScreenMarkup();
-  updateLoadingProgress(0, 0, STARTUP_ASSETS.length, 'INITIALIZING ASSET CACHE');
+  updateLoadingProgress(0, 0, STARTUP_ASSETS.length, 'Loading....');
 }
 
-function updateLoadingProgress(percent, completed, total, status = 'LOADING GAME ASSETS') {
+function updateLoadingProgress(percent, completed, total, status = 'Loading....') {
   const safePercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
   const bar = app.querySelector('[data-loading-bar]');
   const label = app.querySelector('[data-loading-percent]');
@@ -1291,7 +1288,7 @@ window.addEventListener('popstate', () => {
   const preloadSummary = await preloadAssets(STARTUP_ASSETS, {
     onProgress: ({ completed, total }) => {
       const percent = total ? (completed / total) * 100 : 100;
-      const status = completed >= total ? 'ASSETS READY' : 'LOADING GAME ASSETS';
+      const status = completed >= total ? 'Loading....' : 'Loading....';
       updateLoadingProgress(percent, completed, total, status);
     }
   });
@@ -1300,7 +1297,7 @@ window.addEventListener('popstate', () => {
     console.warn('Startup assets unavailable:', preloadSummary.failed);
   }
 
-  updateLoadingProgress(100, preloadSummary.total, preloadSummary.total, 'CONNECTING TO GAME SERVER');
+  updateLoadingProgress(100, preloadSummary.total, preloadSummary.total, 'Loading....');
   const playerResult = await playerRequest;
 
   // Advanced boss/audio files are intentionally non-blocking and continue warming
