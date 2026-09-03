@@ -1009,7 +1009,7 @@ function mountGameplayEngine() {
   activeEngine.start();
   window.setTimeout(showWaveIntro, 60);
 }
-async function refreshPlayer() { const payload = await api.player(PLAYER_ID); model.player = payload.player; model.session = payload.activeSession || null; return payload.activeSession || null; }
+async function refreshPlayer() { const payload = await api.ensurePlayer(PLAYER_ID); model.player = payload.player; model.session = payload.activeSession || null; return payload.activeSession || null; }
 function applySessionToModel(session) {
   if (!session) return;
   model.session = session; model.selectedEntry = session.entryAmount || model.selectedEntry; model.selectedDifficulty = session.difficulty || model.selectedDifficulty;

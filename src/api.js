@@ -33,6 +33,7 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request('/api/health', { timeoutMs: 5000 }),
+  ensurePlayer: (playerId) => request('/api/players/ensure', { method: 'POST', body: JSON.stringify({ playerId }) }),
   player: (playerId) => request(`/api/players/${encodeURIComponent(playerId)}`),
   startSession: ({ playerId, entryAmount, difficulty }) => request('/api/sessions/start', {
     method: 'POST', body: JSON.stringify({ playerId, entryAmount, difficulty })

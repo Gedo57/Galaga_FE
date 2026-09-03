@@ -66,8 +66,41 @@ function resolveApiUrl() {
 }
 
 export const API_URL = resolveApiUrl();
-export const CLIENT_VERSION = import.meta.env?.VITE_CLIENT_VERSION || '0.8.0';
-export const PLAYER_ID = 'demo-player';
+export const CLIENT_VERSION = import.meta.env?.VITE_CLIENT_VERSION || '0.8.1';
+
+const PLAYER_STORAGE_KEY = 'galaga.player.id.v1';
+const PLAYER_ID_PATTERN = /^player-[a-z0-9_-]{12,96}$/i;
+
+function createBrowserPlayerId() {
+  if (globalThis.crypto?.randomUUID) return `player-${globalThis.crypto.randomUUID()}`;
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+    return `player-${token}`;
+  }
+  return `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function resolvePlayerId() {
+  if (typeof window === 'undefined') return 'player-server-runtime';
+
+  try {
+    const stored = String(window.localStorage.getItem(PLAYER_STORAGE_KEY) || '').trim();
+    if (PLAYER_ID_PATTERN.test(stored)) return stored;
+
+    // Deliberately do not reuse the old shared demo-player identity.
+    const created = createBrowserPlayerId();
+    window.localStorage.setItem(PLAYER_STORAGE_KEY, created);
+    return created;
+  } catch {
+    // Private browsing / blocked storage fallback: stable for this page lifetime.
+    if (!window.__GALAGA_PLAYER_ID__) window.__GALAGA_PLAYER_ID__ = createBrowserPlayerId();
+    return window.__GALAGA_PLAYER_ID__;
+  }
+}
+
+export const PLAYER_ID = resolvePlayerId();
 
 export const ENTRY_MIN = 50;
 export const ENTRY_STEP = 50;
