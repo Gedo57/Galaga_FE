@@ -269,7 +269,7 @@ export const WAVES = Object.freeze({
   3: {
     id: 3, label: 'ZIGZAG ASSAULT', enemyCount: 18, patternBudget: 7,
     mix: { fighter: 7, diver: 7, shooter: 4 }, formation: FORMATION_TEMPLATES[3],
-    allowedPatterns: ['singleDive', 'twinDive', 'zigzag'], signaturePattern: 'zigzag', patternWeights: { singleDive: 0.15, twinDive: 0.30, zigzag: 0.55 }, fireTokens: 1, checkpoint: true,
+    allowedPatterns: ['singleDive', 'twinDive', 'zigzag'], signaturePattern: 'zigzag', patternWeights: { singleDive: 0.15, twinDive: 0.30, zigzag: 0.55 }, fireTokens: 1,
     scoreGate: SCORE_GATES[3], multiplier: CHECKPOINT_MULTIPLIERS[3], timeCap: 45
   },
   4: {
@@ -291,7 +291,7 @@ export const WAVES = Object.freeze({
   7: {
     id: 7, label: 'CROSSFIRE', enemyCount: 22, patternBudget: 13,
     mix: { fighter: 4, diver: 6, shooter: 6, heavy: 3, charger: 3 }, formation: FORMATION_TEMPLATES[7],
-    allowedPatterns: ['crossfire', 'pincer', 'twinDive', 'charge'], signaturePattern: 'crossfire', patternWeights: { crossfire: 0.55, pincer: 0.15, twinDive: 0.15, charge: 0.15 }, fireTokens: 2, checkpoint: true,
+    allowedPatterns: ['crossfire', 'pincer', 'twinDive', 'charge'], signaturePattern: 'crossfire', patternWeights: { crossfire: 0.55, pincer: 0.15, twinDive: 0.15, charge: 0.15 }, fireTokens: 2,
     scoreGate: SCORE_GATES[7], multiplier: CHECKPOINT_MULTIPLIERS[7], timeCap: 42
   },
   8: {
@@ -302,7 +302,7 @@ export const WAVES = Object.freeze({
   9: {
     id: 9, label: 'ELITE ASSAULT', enemyCount: 22, patternBudget: 16,
     mix: { fighter: 4, diver: 4, shooter: 4, heavy: 4, charger: 3, elite: 3 }, formation: FORMATION_TEMPLATES[9],
-    allowedPatterns: ['eliteAssault', 'crossfire', 'pincer', 'charge', 'spiral'], signaturePattern: 'eliteAssault', patternWeights: { eliteAssault: 0.50, crossfire: 0.15, pincer: 0.12, charge: 0.13, spiral: 0.10 }, fireTokens: 2, checkpoint: true,
+    allowedPatterns: ['eliteAssault', 'crossfire', 'pincer', 'charge', 'spiral'], signaturePattern: 'eliteAssault', patternWeights: { eliteAssault: 0.50, crossfire: 0.15, pincer: 0.12, charge: 0.13, spiral: 0.10 }, fireTokens: 2,
     scoreGate: SCORE_GATES[9], multiplier: CHECKPOINT_MULTIPLIERS[9], timeCap: 40
   },
   10: {

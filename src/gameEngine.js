@@ -23,12 +23,14 @@ const ENEMY = Object.freeze({
 });
 
 // Difficulty Combat Rebuild — HP identity.
-// Regular line ships take exactly 1 / 2 / 3 player shots on Easy / Medium / Hard.
-// Specialist classes keep their durability advantage instead of collapsing to one HP value.
+// Patch 7 shifts the durability ladder upward: line ships now take 2 / 3 / 4
+// player shots on Easy / Medium / Hard, while specialists retain extra durability.
 export const DIFFICULTY_ENEMY_HP = Object.freeze({
-  easy: Object.freeze({ fighter: 1, diver: 1, shooter: 1, charger: 2, heavy: 3, elite: 4, miniBoss: 75, finalBoss: 150 }),
-  medium: Object.freeze({ fighter: 2, diver: 2, shooter: 2, charger: 3, heavy: 4, elite: 5, miniBoss: 110, finalBoss: 220 }),
-  hard: Object.freeze({ fighter: 3, diver: 3, shooter: 3, charger: 4, heavy: 5, elite: 6, miniBoss: 160, finalBoss: 320 })
+  // Patch 7: the whole ladder is intentionally shifted upward.
+  // EASY = Medium+, MEDIUM = Hard, HARD = Extreme.
+  easy: Object.freeze({ fighter: 2, diver: 2, shooter: 2, charger: 3, heavy: 4, elite: 5, miniBoss: 120, finalBoss: 250 }),
+  medium: Object.freeze({ fighter: 3, diver: 3, shooter: 3, charger: 4, heavy: 5, elite: 6, miniBoss: 180, finalBoss: 360 }),
+  hard: Object.freeze({ fighter: 4, diver: 4, shooter: 4, charger: 5, heavy: 7, elite: 8, miniBoss: 260, finalBoss: 520 })
 });
 
 export function combatHpForDifficulty(type, difficulty = 'medium') {
@@ -37,35 +39,37 @@ export function combatHpForDifficulty(type, difficulty = 'medium') {
 }
 
 const TUNING = {
+  // Patch 7 combat ladder: player movement stays identical. Difficulty comes
+  // from enemy speed, cadence, coordination and shorter reaction windows.
   easy: {
     playerSpeed: 0.70,
-    enemyBulletSpeed: 0.31,
-    enemyFireInterval: 1.85,
-    formationSpeed: 0.68,
+    enemyBulletSpeed: 0.47,
+    enemyFireInterval: 1.05,
+    formationSpeed: 1.00,
     autoFireInterval: 0.21,
-    attackSpeed: 0.78,
-    shooterChargeChance: 0.10,
-    telegraphScale: 1.22
+    attackSpeed: 1.12,
+    shooterChargeChance: 0.35,
+    telegraphScale: 0.94
   },
   medium: {
     playerSpeed: 0.70,
-    enemyBulletSpeed: 0.42,
-    enemyFireInterval: 1.25,
-    formationSpeed: 0.90,
+    enemyBulletSpeed: 0.57,
+    enemyFireInterval: 0.75,
+    formationSpeed: 1.17,
     autoFireInterval: 0.21,
-    attackSpeed: 1.0,
-    shooterChargeChance: 0.28,
-    telegraphScale: 1.0
+    attackSpeed: 1.34,
+    shooterChargeChance: 0.52,
+    telegraphScale: 0.78
   },
   hard: {
     playerSpeed: 0.70,
-    enemyBulletSpeed: 0.54,
-    enemyFireInterval: 0.82,
-    formationSpeed: 1.10,
+    enemyBulletSpeed: 0.68,
+    enemyFireInterval: 0.55,
+    formationSpeed: 1.35,
     autoFireInterval: 0.21,
-    attackSpeed: 1.26,
-    shooterChargeChance: 0.48,
-    telegraphScale: 0.82
+    attackSpeed: 1.58,
+    shooterChargeChance: 0.68,
+    telegraphScale: 0.66
   }
 };
 
@@ -908,7 +912,7 @@ export class CoreGameplayEngine {
     const payload = attack.payload || {};
     if (kind === 'tripleAim') this.fireMiniBossAimedVolley(boss, 3, 0.105, 1.0, 'miniBossTripleBullet');
     else if (kind === 'arcSweep') this.fireMiniBossArc(boss, 5, 0.46, 0.90, 0, 'miniBossArcBullet');
-    else if (kind === 'alternatingSpread') this.fireMiniBossArc(boss, this.difficulty === 'easy' ? 5 : 7, 0.54, this.difficulty === 'hard' ? 1.02 : 0.94, Number(payload.bias || 0), 'miniBossAlternatingBullet');
+    else if (kind === 'alternatingSpread') this.fireMiniBossArc(boss, this.difficulty === 'hard' ? 9 : 7, this.difficulty === 'hard' ? 0.62 : 0.56, this.difficulty === 'hard' ? 1.12 : this.difficulty === 'medium' ? 1.04 : 0.98, Number(payload.bias || 0), 'miniBossAlternatingBullet');
     else if (kind === 'targetHeavy') this.fireMiniBossTargetHeavy(boss, Number(payload.targetX ?? this.player.x));
     else if (kind === 'safeFan') this.fireMiniBossSafeFan(boss, Number(payload.safeGapSide || -1));
   }
@@ -949,7 +953,7 @@ export class CoreGameplayEngine {
     const dx = clamp(targetX, 0.06, 0.94) - boss.x;
     const dy = Math.max(0.20, this.player.y - boss.y);
     const mag = Math.hypot(dx, dy) || 1;
-    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.08 : 0.98);
+    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.16 : this.difficulty === 'medium' ? 1.08 : 1.02);
     this.effects.push({ x: boss.x, y: boss.y + 0.07, age: 0, duration: 0.20, kind: 'enemyMuzzle', enemyType: 'miniBoss', charged: true });
     this.effects.push({ x: boss.x, y: boss.y + 0.075, age: 0, duration: 0.34, kind: 'spriteEffect', spriteKey: 'miniBossHeavyCharge', sizeMul: 1.04, alphaMul: 0.62, pulse: true, grow: 0.12, shadowColor: '#ffab61' });
     this.enemyBullets.push({ x: boss.x, y: boss.y + 0.075, vx: (dx / mag) * speed, vy: (dy / mag) * speed, sprite: 'miniBossHeavyProjectile', charged: true, sizeMul: 1.20, trailColor: '#ffc57a' });
@@ -958,13 +962,13 @@ export class CoreGameplayEngine {
 
   fireMiniBossSafeFan(boss, safeGapSide = -1) {
     if (!boss?.alive) return false;
-    const count = this.difficulty === 'easy' ? 7 : 9;
-    const arc = this.difficulty === 'hard' ? 0.66 : 0.60;
-    const skip = this.difficulty === 'hard' ? 1 : 2;
+    const count = this.difficulty === 'hard' ? 11 : 9;
+    const arc = this.difficulty === 'hard' ? 0.72 : this.difficulty === 'medium' ? 0.66 : 0.62;
+    const skip = this.difficulty === 'easy' ? 2 : 1;
     const gapCenter = safeGapSide < 0 ? Math.floor(count * 0.34) : Math.ceil(count * 0.66);
     const bulletsNeeded = count - skip;
     if (this.enemyBullets.length >= 28 - bulletsNeeded) return false;
-    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.04 : 0.94);
+    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.12 : this.difficulty === 'medium' ? 1.06 : 1.00);
     this.effects.push({ x: boss.x, y: boss.y + 0.07, age: 0, duration: 0.18, kind: 'enemyMuzzle', enemyType: 'miniBoss', charged: true });
     for (let i = 0; i < count; i += 1) {
       if (Math.abs(i - gapCenter) < skip) continue;
@@ -977,7 +981,7 @@ export class CoreGameplayEngine {
 
   runMiniBossScriptStep(boss, phase) {
     const script = this.miniBossScript;
-    const cadence = this.difficulty === 'hard' ? 0.80 : this.difficulty === 'easy' ? 1.22 : 1;
+    const cadence = this.difficulty === 'hard' ? 0.66 : this.difficulty === 'medium' ? 0.80 : 0.94;
     const step = script.step;
     let delay = 0.8;
     if (phase === 1) {
@@ -1065,7 +1069,7 @@ export class CoreGameplayEngine {
 
   finalBossBulletCap() {
     const portrait = this.canvas.height >= this.canvas.width;
-    const base = this.difficulty === 'hard' ? 28 : this.difficulty === 'easy' ? 20 : 24;
+    const base = this.difficulty === 'hard' ? 32 : this.difficulty === 'medium' ? 28 : 24;
     return Math.max(14, Math.round(base * (portrait ? 0.84 : 1)));
   }
 
@@ -1119,12 +1123,12 @@ export class CoreGameplayEngine {
     if (!boss?.alive || !attack) return;
     const kind = String(attack.kind || '');
     const payload = attack.payload || {};
-    if (kind === 'doubleAim') this.fireFinalBossAimedVolley(boss, this.difficulty === 'hard' ? 3 : 2, 0.075, 0.98, 'finalBossBullet', { trailColor: '#ff8aa0', sizeMul: 1.10 });
-    else if (kind === 'aimedBurst') this.fireFinalBossAimedVolley(boss, this.difficulty === 'easy' ? 2 : 3, 0.085, this.difficulty === 'hard' ? 1.08 : 1.0, 'finalBossBullet', { trailColor: '#ff7f95', sizeMul: 1.12 });
+    if (kind === 'doubleAim') this.fireFinalBossAimedVolley(boss, this.difficulty === 'hard' ? 4 : 3, 0.072, this.difficulty === 'hard' ? 1.08 : this.difficulty === 'medium' ? 1.03 : 0.99, 'finalBossBullet', { trailColor: '#ff8aa0', sizeMul: 1.10 });
+    else if (kind === 'aimedBurst') this.fireFinalBossAimedVolley(boss, this.difficulty === 'hard' ? 4 : 3, 0.082, this.difficulty === 'hard' ? 1.16 : this.difficulty === 'medium' ? 1.08 : 1.02, 'finalBossBullet', { trailColor: '#ff7f95', sizeMul: 1.12 });
     else if (kind === 'straightLanes') this.fireFinalBossStraightLanes(boss);
     else if (kind === 'fiveFan') this.fireFinalBossArc(boss, 5, 0.46, 0.92, Number(payload.bias || 0), 'finalBossSpread', { trailColor: '#ff9c79', sizeMul: 1.12 });
-    else if (kind === 'sevenSpread') this.fireFinalBossArc(boss, this.difficulty === 'easy' ? 5 : 7, this.difficulty === 'hard' ? 0.60 : 0.54, this.difficulty === 'hard' ? 1.02 : 0.94, Number(payload.bias || 0), 'finalBossSpread', { trailColor: '#ff8b83', sizeMul: 1.14 });
-    else if (kind === 'alternatingArc') this.fireFinalBossArc(boss, this.difficulty === 'hard' ? 8 : 7, 0.58, this.difficulty === 'hard' ? 1.04 : 0.96, Number(payload.bias || 0), 'finalBossSpread', { trailColor: '#ff6fa4', sizeMul: 1.16 });
+    else if (kind === 'sevenSpread') this.fireFinalBossArc(boss, this.difficulty === 'hard' ? 9 : 7, this.difficulty === 'hard' ? 0.68 : this.difficulty === 'medium' ? 0.60 : 0.56, this.difficulty === 'hard' ? 1.12 : this.difficulty === 'medium' ? 1.04 : 0.98, Number(payload.bias || 0), 'finalBossSpread', { trailColor: '#ff8b83', sizeMul: 1.14 });
+    else if (kind === 'alternatingArc') this.fireFinalBossArc(boss, this.difficulty === 'hard' ? 9 : this.difficulty === 'medium' ? 8 : 7, this.difficulty === 'hard' ? 0.66 : this.difficulty === 'medium' ? 0.61 : 0.58, this.difficulty === 'hard' ? 1.14 : this.difficulty === 'medium' ? 1.06 : 1.00, Number(payload.bias || 0), 'finalBossSpread', { trailColor: '#ff6fa4', sizeMul: 1.16 });
     else if (kind === 'safeGap') this.fireFinalBossSafeGap(boss, Number(payload.safeGapSide || -1));
     else if (kind === 'laser') this.startBossLaser(Number(payload.targetX ?? this.player.x));
   }
@@ -1155,10 +1159,10 @@ export class CoreGameplayEngine {
 
   fireFinalBossStraightLanes(boss) {
     if (!boss?.alive) return false;
-    const offsets = this.difficulty === 'hard' ? [-0.085, -0.042, 0, 0.042, 0.085] : [-0.065, 0, 0.065];
+    const offsets = this.difficulty === 'hard' ? [-0.096, -0.064, -0.032, 0, 0.032, 0.064, 0.096] : [-0.085, -0.042, 0, 0.042, 0.085];
     const cap = this.finalBossBulletCap();
     if (this.enemyBullets.length > cap - offsets.length) return false;
-    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 0.98 : 0.90);
+    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.08 : this.difficulty === 'medium' ? 1.00 : 0.94);
     this.effects.push({ x: boss.x, y: boss.y + 0.085, age: 0, duration: 0.18, kind: 'enemyMuzzle', enemyType: 'finalBoss', charged: false });
     for (const offset of offsets) {
       this.enemyBullets.push({
@@ -1199,16 +1203,16 @@ export class CoreGameplayEngine {
   fireFinalBossSafeGap(boss, safeGapSide = -1) {
     if (!boss?.alive) return false;
     const portrait = this.canvas.height >= this.canvas.width;
-    const count = this.difficulty === 'easy' ? 7 : 9;
-    const arc = this.difficulty === 'hard' ? 0.68 : 0.62;
-    const baseSkip = this.difficulty === 'hard' ? 1 : this.difficulty === 'easy' ? 2 : 2;
+    const count = this.difficulty === 'hard' ? 11 : 9;
+    const arc = this.difficulty === 'hard' ? 0.74 : this.difficulty === 'medium' ? 0.68 : 0.64;
+    const baseSkip = this.difficulty === 'easy' ? 2 : 1;
     const skipRadius = baseSkip + (portrait ? 1 : 0);
     const gapCenter = safeGapSide < 0 ? Math.floor(count * 0.30) : Math.ceil(count * 0.70);
     const indices = [];
     for (let i = 0; i < count; i += 1) if (Math.abs(i - gapCenter) >= skipRadius) indices.push(i);
     const cap = this.finalBossBulletCap();
     if (this.enemyBullets.length > cap - indices.length) return false;
-    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.06 : 0.96);
+    const speed = this.tuning.enemyBulletSpeed * (this.difficulty === 'hard' ? 1.16 : this.difficulty === 'medium' ? 1.08 : 1.00);
     this.effects.push({ x: boss.x, y: boss.y + 0.085, age: 0, duration: 0.20, kind: 'enemyMuzzle', enemyType: 'finalBoss', charged: true });
     for (const i of indices) {
       const t = i / Math.max(1, count - 1);
@@ -1229,7 +1233,7 @@ export class CoreGameplayEngine {
 
   runFinalBossScriptStep(boss, phase) {
     const script = this.finalBossScript;
-    const cadence = this.difficulty === 'hard' ? 0.80 : this.difficulty === 'easy' ? 1.22 : 1;
+    const cadence = this.difficulty === 'hard' ? 0.64 : this.difficulty === 'medium' ? 0.78 : 0.92;
     const step = script.step;
     let delay = 0.90;
 
@@ -1361,13 +1365,13 @@ export class CoreGameplayEngine {
 
   startBossLaser(targetX = this.player.x) {
     if (this.bossLaser) return false;
-    const telegraph = this.difficulty === 'easy' ? 1.28 : this.difficulty === 'hard' ? 0.92 : 1.10;
+    const telegraph = this.difficulty === 'hard' ? 0.72 : this.difficulty === 'medium' ? 0.86 : 1.02;
     this.bossLaser = {
       x: clamp(Number(targetX ?? this.player.x), 0.08, 0.92),
-      width: this.difficulty === 'hard' ? 0.064 : this.difficulty === 'easy' ? 0.046 : 0.055,
+      width: this.difficulty === 'hard' ? 0.072 : this.difficulty === 'medium' ? 0.064 : 0.055,
       telegraph,
       telegraphDuration: telegraph,
-      active: this.difficulty === 'hard' ? 0.48 : 0.44,
+      active: this.difficulty === 'hard' ? 0.54 : this.difficulty === 'medium' ? 0.50 : 0.46,
       hitApplied: false
     };
     this.patternBanner = { label: 'LASER • MOVE!', timer: Math.min(1.0, telegraph) };
@@ -1570,10 +1574,10 @@ export class CoreGameplayEngine {
   }
 
   regularThreatLimit() {
-    // Easy protects the player from stacked threat channels. Hard deliberately
-    // allows an active attack pattern plus more formation fire.
-    if (this.difficulty === 'easy') return this.currentWave <= 4 ? 1 : 2;
-    if (this.difficulty === 'hard') return this.currentWave <= 2 ? 2 : 3;
+    // Patch 7: Easy now behaves like a Medium+ baseline, Medium like the old
+    // Hard pressure model, and Hard can sustain the most stacked channels.
+    if (this.difficulty === 'hard') return this.currentWave <= 2 ? 2 : this.currentWave <= 5 ? 3 : 4;
+    if (this.difficulty === 'medium') return this.currentWave <= 2 ? 2 : 3;
     return this.currentWave <= 2 ? 1 : 2;
   }
 
@@ -1585,16 +1589,15 @@ export class CoreGameplayEngine {
     if (Number(this.recoveryTimer || 0) > 0) return 0;
     const configured = Math.max(0, Number(this.waveDef.fireTokens ?? (this.currentWave >= 4 ? 2 : 1)));
     if (!configured) return 0;
-    if (this.difficulty === 'easy' && this.hasActiveAttackers()) return 0;
     const remainingThreatChannels = Math.max(0, this.regularThreatLimit() - this.activePatternThreats());
-    if (this.currentWave <= 2 && this.difficulty !== 'hard' && this.hasActiveAttackers()) return 0;
+    if (this.currentWave <= 2 && this.difficulty === 'easy' && this.hasActiveAttackers()) return 0;
     return Math.min(configured, remainingThreatChannels);
   }
 
   enemyBulletCap() {
     const portrait = this.canvas.height >= this.canvas.width;
     const waveBase = this.currentWave <= 2 ? 12 : this.currentWave <= 4 ? 16 : this.currentWave <= 6 ? 18 : 22;
-    const difficultyAdd = this.difficulty === 'hard' ? 5 : this.difficulty === 'easy' ? -4 : 0;
+    const difficultyAdd = this.difficulty === 'hard' ? 7 : this.difficulty === 'medium' ? 5 : 0;
     const portraitFactor = portrait ? 0.84 : 1;
     return Math.max(8, Math.round((waveBase + difficultyAdd) * portraitFactor));
   }
@@ -1704,20 +1707,20 @@ export class CoreGameplayEngine {
           }
         }
       }
-      const count = Math.min(this.difficulty === 'hard' ? 5 : this.difficulty === 'easy' ? 3 : 4, pool.length);
+      const count = Math.min(this.difficulty === 'hard' ? 6 : this.difficulty === 'medium' ? 5 : 4, pool.length);
       const selected = [...pool].sort((a, b) => a.formationOrder - b.formationOrder).slice(0, count);
       if (selected.length < 3) return false;
       selected.forEach((enemy, index) => this.launchAttack(enemy, 'swarm', { lane: index, total: selected.length, delay: index * 0.10 }));
       return true;
     }
     if (patternId === 'charge') {
-      const selected = this.pick(chargers, Math.min(this.difficulty === 'easy' ? 1 : 2, chargers.length));
+      const selected = this.pick(chargers, Math.min(this.difficulty === 'hard' ? 3 : 2, chargers.length));
       if (!selected.length) return false;
       selected.forEach((enemy, index) => this.launchAttack(enemy, 'charge', { targetX: clamp(this.player.x + (index ? 0.08 : -0.08), 0.08, 0.92), delay: index * 0.18 }));
       return true;
     }
     if (patternId === 'eliteAssault') {
-      const selected = this.pick(elites, Math.min(this.difficulty === 'easy' ? 1 : 2, elites.length));
+      const selected = this.pick(elites, Math.min(this.difficulty === 'hard' ? 3 : 2, elites.length));
       if (!selected.length) return false;
       selected.forEach((enemy, index) => this.launchAttack(enemy, 'eliteAssault', { side: index % 2 ? 1 : -1, delay: index * 0.16 }));
       return true;
@@ -1880,10 +1883,10 @@ export class CoreGameplayEngine {
       enemy.y = attack.startY + Math.sin(t * Math.PI) * 0.22;
       enemy.fireCooldown -= dt;
       if (enemy.fireCooldown <= 0 && t > 0.20 && t < 0.76 && this.enemyBullets.length < this.enemyBulletCap()) {
-        const charged = enemy.attackShots >= 1 && this.difficulty !== 'easy';
+        const charged = enemy.attackShots >= 1;
         this.fireAimedEnemyBullet(enemy, charged, side * -0.055);
         enemy.attackShots += 1;
-        const cadence = this.difficulty === 'hard' ? 0.44 : this.difficulty === 'easy' ? 0.66 : 0.54;
+        const cadence = this.difficulty === 'hard' ? 0.34 : this.difficulty === 'medium' ? 0.42 : 0.50;
         enemy.fireCooldown = cadence;
       }
     } else if (attack.kind === 'swarm') {
@@ -1905,7 +1908,7 @@ export class CoreGameplayEngine {
         this.queueEliteBurst(enemy, side * 0.045);
         enemy.attackShots = 1;
       }
-      if (this.difficulty === 'hard' && t > 0.62 && !enemy.pendingBurst && enemy.attackShots === 1) {
+      if (this.difficulty !== 'easy' && t > 0.62 && !enemy.pendingBurst && enemy.attackShots === 1) {
         this.queueEliteBurst(enemy, side * -0.035);
         enemy.attackShots = 2;
       }
@@ -1913,7 +1916,7 @@ export class CoreGameplayEngine {
 
     if (enemy.type === 'diver' && ['dive', 'zigzag', 'pincer', 'spiral'].includes(attack.kind)) {
       enemy.fireCooldown -= dt;
-      const maxDiveShots = this.difficulty === 'hard' ? 2 : 1;
+      const maxDiveShots = this.difficulty === 'easy' && this.currentWave <= 2 ? 1 : 2;
       if (enemy.fireCooldown <= 0 && enemy.attackShots < maxDiveShots && t > 0.30 && t < 0.66 && this.enemyBullets.length < this.enemyBulletCap()) {
         this.fireAimedEnemyBullet(enemy, false);
         enemy.attackShots += 1;
@@ -1927,7 +1930,8 @@ export class CoreGameplayEngine {
   startAttackRecovery(kind) {
     const duration = Number(RECOVERY_AFTER_ATTACK[String(kind || '')] || 0);
     if (duration <= 0 || this.isBossWave()) return;
-    this.recoveryTimer = Math.max(Number(this.recoveryTimer || 0), duration);
+    const difficultyScale = this.difficulty === 'hard' ? 0.55 : this.difficulty === 'medium' ? 0.72 : 0.90;
+    this.recoveryTimer = Math.max(Number(this.recoveryTimer || 0), duration * difficultyScale);
   }
 
   returnToFormation(enemy) {
@@ -2132,7 +2136,7 @@ export class CoreGameplayEngine {
         heavy: 1.85,
         elite: 2.15
       };
-      const diffFactor = this.difficulty === 'hard' ? 0.84 : this.difficulty === 'easy' ? 1.18 : 1;
+      const diffFactor = this.difficulty === 'hard' ? 0.70 : this.difficulty === 'medium' ? 0.82 : 0.94;
       const lastStandCooldown = this.lastStandActive
         ? (enemy.type === 'shooter' ? 0.90 : enemy.type === 'fighter' ? 0.95 : 0.97)
         : 1;

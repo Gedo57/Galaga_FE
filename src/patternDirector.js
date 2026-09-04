@@ -74,17 +74,23 @@ export class PatternDirector {
       let weight = Number(this.patternWeights[pattern.id] ?? 1);
       if (pattern.id === this.signaturePattern) weight *= 1.18 + pressure * 0.28;
       if (pattern.id === this.lastPattern) weight *= 0.62;
-      if (pressure > 0.72 && ['singleDive', 'twinDive'].includes(pattern.id)) weight *= 1.22;
-      // Difficulty changes pattern pressure, not just projectile speed. Easy favors
-      // readable low-cost attacks; Hard biases toward coordinated high-cost moves.
+      // Patch 7: every difficulty now starts aggressive. Easy is Medium+,
+      // Medium is Hard, and Hard strongly favors coordinated high-cost patterns.
       if (this.difficulty === 'easy') {
-        if (pattern.cost >= 4) weight *= 0.46;
-        else if (pattern.cost >= 3) weight *= 0.62;
-        else if (pattern.cost === 1) weight *= 1.18;
+        if (pattern.cost >= 4) weight *= 0.95;
+        else if (pattern.cost >= 3) weight *= 1.08;
+        else if (pattern.cost === 1) weight *= 0.94;
+      } else if (this.difficulty === 'medium') {
+        if (pattern.cost >= 4) weight *= 1.35;
+        else if (pattern.cost >= 3) weight *= 1.22;
+        else if (pattern.cost === 1) weight *= 0.84;
       } else if (this.difficulty === 'hard') {
-        if (pattern.cost >= 4) weight *= 1.48;
-        else if (pattern.cost >= 3) weight *= 1.30;
-        else if (pattern.cost === 1) weight *= 0.86;
+        if (pattern.cost >= 4) weight *= 1.75;
+        else if (pattern.cost >= 3) weight *= 1.50;
+        else if (pattern.cost === 1) weight *= 0.68;
+      }
+      if (pressure > 0.72 && pattern.cost === 1) {
+        weight *= this.difficulty === 'hard' ? 0.60 : this.difficulty === 'medium' ? 0.76 : 0.92;
       }
       return weight;
     }, this.random);
@@ -98,10 +104,10 @@ export class PatternDirector {
       engine.onPatternActivated(selected, this.activations);
     }
 
-    const base = this.difficulty === 'hard' ? 2.15 : this.difficulty === 'easy' ? 4.60 : 3.25;
+    const base = this.difficulty === 'hard' ? 1.55 : this.difficulty === 'medium' ? 2.10 : 2.90;
     const lateWaveFactor = 1 - pressure * 0.34;
     const enrageFactor = engine.enraged ? 0.74 : 1;
-    this.cooldown = Math.max(1.05, (base + this.random() * 0.95) * lateWaveFactor * enrageFactor);
+    this.cooldown = Math.max(this.difficulty === 'hard' ? 0.70 : this.difficulty === 'medium' ? 0.82 : 0.95, (base + this.random() * 0.72) * lateWaveFactor * enrageFactor);
   }
 
   snapshot() {

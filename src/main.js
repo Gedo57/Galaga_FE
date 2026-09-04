@@ -10,7 +10,8 @@ import { GameState, StateMachine } from './stateMachine.js';
 const app = document.querySelector('#app');
 const machine = new StateMachine(GameState.MENU);
 const DECISION_SECONDS = 8;
-const CASHOUT_WAVES = Object.freeze([3, 5, 7, 9, 10]);
+const REWARD_TIER_WAVES = Object.freeze([3, 5, 7, 9, 10]);
+const CASHOUT_WAVES = Object.freeze([5, 10]);
 
 const AUDIO_GAMEPLAY_STATES = new Set([
   GameState.COUNTDOWN,
@@ -456,7 +457,7 @@ function mainMenuFleetMarkup() {
 function bestUnlockedTier(wave = model.wave, score = model.score, difficulty = activeDifficulty()) {
   let multiplier = 0;
   let checkpointWave = 0;
-  for (const candidate of CASHOUT_WAVES) {
+  for (const candidate of REWARD_TIER_WAVES) {
     if (candidate > Number(wave || 1)) break;
     const gate = checkpointScoreGate(candidate, difficulty);
     if (gate > 0 && Number(score || 0) >= gate) {
@@ -754,6 +755,8 @@ function checkpointScreen() {
   const next = nextCheckpointAfter(model.wave) || {};
   const nextMultiplier = Number(cp.nextMultiplier || next.multiplier || 0);
   const nextReward = Number(cp.nextReward ?? (nextMultiplier ? Math.round(entry * nextMultiplier) : 0));
+  const nextTargetWave = Number(cp.nextCheckpointWave || next.wave || 0);
+  const nextTargetLabel = nextTargetWave === 10 ? 'FINAL BOSS • WAVE 10' : `NEXT TARGET • WAVE ${nextTargetWave || '—'}`;
   const canContinue = Boolean(cp.canContinue ?? model.wave < 10);
   return `<section class="screen modal-screen checkpoint-screen">${backgrounds('gameplay')}
     <div class="sci-panel checkpoint-panel phase5-checkpoint"><div class="panel-kicker">CHECKPOINT</div><h1 class="panel-title">WAVE ${model.wave} DECISION</h1>
@@ -763,10 +766,10 @@ function checkpointScreen() {
       <div class="cashout-comparison">
         <div class="cashout-card current"><span>CASH OUT NOW</span><strong>${money(currentReward)} COINS</strong><em>${cp.bestUnlockedWave ? `BEST UNLOCKED x${currentMultiplier.toFixed(2)}` : `START FLOOR x${currentMultiplier.toFixed(2)}`}</em></div>
         <div class="risk-arrow">→</div>
-        <div class="cashout-card next"><span>NEXT TARGET • WAVE ${cp.nextCheckpointWave || next.wave || '—'}</span><strong>${nextReward ? `${money(nextReward)} COINS` : '—'}</strong><em>${nextMultiplier ? `x${nextMultiplier.toFixed(2)} • SCORE ${money(cp.nextScoreGate || next.scoreGate)}` : 'FINAL TIER'}</em></div>
+        <div class="cashout-card next"><span>${nextTargetLabel}</span><strong>${nextReward ? `${money(nextReward)} COINS` : '—'}</strong><em>${nextMultiplier ? `x${nextMultiplier.toFixed(2)} • SCORE ${money(cp.nextScoreGate || next.scoreGate)}` : 'FINAL TIER'}</em></div>
       </div>
       <div class="checkpoint-strip"><div><span>RATING</span><strong>${rating}</strong></div><div><span>ENTRY</span><strong>${money(entry)}</strong></div><div><span>LIVES</span><strong>${model.lives}</strong></div></div>
-      <p class="info-copy decision-copy">Cash Out settles the best score-gated tier reached so far. If no tier is unlocked yet, the selected difficulty's Start Multiplier is the payout floor. Continue keeps the same run and risks the unsettled reward. Timer expiry always requests Auto Cash Out.</p>
+      <p class="info-copy decision-copy">Cash Out is available only after the Mini Boss. Continue commits the run through Waves 6–10 with no further manual cashout. Defeating the Final Boss settles the final payout automatically using the best score-gated reward tier reached. Timer expiry requests Auto Cash Out.</p>
       <div class="checkpoint-actions"><button class="ui-button secondary cashout-button" data-action="cashout" ${checkpointDecisionPending ? 'disabled' : ''}>${checkpointDecisionPending ? 'SETTLING…' : `CASH OUT • ${money(currentReward)}`}</button>
       ${canContinue ? `<button class="ui-button" data-action="continue-wave" ${checkpointDecisionPending ? 'disabled' : ''}>CONTINUE TO WAVE ${model.wave + 1}</button>` : '<button class="ui-button" disabled>FINAL RUN COMPLETE</button>'}</div>
       <button class="text-danger-button" data-action="abandon">ABANDON RUN • REWARD 0</button>
@@ -968,7 +971,7 @@ async function handleWaveClear(snapshot) {
       else { machine.set(GameState.WAVE_CLEAR, { force: true }); scheduleAutoAdvance(); }
     } else {
       model.lastWaveResult = snapshot.waveResult; model.score = snapshot.score;
-      if ([3, 5, 7, 9].includes(model.wave)) { model.checkpoint = makeDevCheckpoint(model.wave); machine.set(GameState.CHECKPOINT, { force: true }); }
+      if (model.wave === 5) { model.checkpoint = makeDevCheckpoint(model.wave); machine.set(GameState.CHECKPOINT, { force: true }); }
       else { machine.set(GameState.WAVE_CLEAR, { force: true }); scheduleAutoAdvance(); }
     }
     if (Number(snapshot.wave ?? model.wave) < 10 && machine.state !== GameState.BOSS_COMPLETE) {
@@ -1133,7 +1136,7 @@ function makeDevCheckpoint(wave) {
   const unlocked = model.score >= gate;
   let bestMultiplier = runStartMultiplier(difficulty);
   let bestUnlockedWave = null;
-  for (const checkpointWave of CASHOUT_WAVES) {
+  for (const checkpointWave of REWARD_TIER_WAVES) {
     if (checkpointWave > wave) break;
     if (model.score >= checkpointScoreGate(checkpointWave, difficulty)) {
       bestMultiplier = checkpointMultiplier(checkpointWave, difficulty);
@@ -1153,7 +1156,7 @@ function makeDevCheckpoint(wave) {
 function devPreviewFromQuery() {
   const params = new URLSearchParams(location.search); const q = params.get('screen'); if (!q) return false;
   const wave = Math.max(1, Math.min(10, Number(params.get('wave') || 1))); model.wave = wave;
-  const previewGateWave = [...CASHOUT_WAVES].reverse().find((candidate) => candidate <= wave);
+  const previewGateWave = [...REWARD_TIER_WAVES].reverse().find((candidate) => candidate <= wave);
   const previewDefaultScore = previewGateWave ? checkpointScoreGate(previewGateWave, model.selectedDifficulty) + 5000 : 0;
   model.score = Number(params.get('score') || previewDefaultScore);
   const map = { menu: GameState.MENU, entry: GameState.ENTRY_SELECTED, gameplay: GameState.WAVE_PLAYING, clear: GameState.WAVE_CLEAR, checkpoint: GameState.CHECKPOINT, result: GameState.RESULT, lost: GameState.RUN_LOST, boss: GameState.BOSS_COMPLETE };
