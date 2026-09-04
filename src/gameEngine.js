@@ -270,6 +270,12 @@ function isTouchPrimary() {
   return window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
 }
 
+function isPortraitMobile() {
+  const portrait = window.matchMedia?.('(orientation: portrait)')?.matches ?? (window.innerHeight >= window.innerWidth);
+  const shortSide = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+  return isTouchPrimary() && portrait && shortSide > 0 && shortSide <= 1024;
+}
+
 function hashSeed(value) {
   let hash = 2166136261;
   const text = String(value || 'phase-8');
@@ -310,6 +316,9 @@ export class CoreGameplayEngine {
     this.random = makeRandom(`${options.seed || options.sessionId || 'phase-8-preview'}:wave:${this.currentWave}`);
     this.images = Object.fromEntries(Object.entries(ASSETS).map(([key, src]) => [key, makeImage(src)]));
     this.touchMode = isTouchPrimary();
+    this.mobilePortrait = isPortraitMobile();
+    this.targetFrameMs = 1000 / 60;
+    this.frameAccumulatorMs = 0;
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -343,7 +352,7 @@ export class CoreGameplayEngine {
     this.waveStartFxTimer = this.waveElapsed < 1.5 ? 1.25 : 0;
     this.bossLaserFireFlashTimer = 0;
     this.vfxRandom = makeRandom(`${options.seed || options.sessionId || 'phase-8-preview'}:vfx:wave:${this.currentWave}`);
-    this.ambientParticles = Array.from({ length: this.reducedMotion ? 24 : 58 }, (_, index) => ({
+    this.ambientParticles = Array.from({ length: this.reducedMotion ? 24 : (this.mobilePortrait ? 28 : 58) }, (_, index) => ({
       x: this.vfxRandom(), y: this.vfxRandom(), size: 0.35 + this.vfxRandom() * 1.4,
       speed: 0.006 + this.vfxRandom() * 0.018, alpha: 0.16 + this.vfxRandom() * 0.42,
       drift: (this.vfxRandom() - 0.5) * 0.012, layer: index % 3
@@ -435,6 +444,11 @@ export class CoreGameplayEngine {
     this.boundPointerUp = (event) => this.handlePointerUp(event);
   }
 
+  vfxGlow(value) {
+    const numeric = Math.max(0, Number(value) || 0);
+    return this.mobilePortrait ? numeric * 0.58 : numeric;
+  }
+
   emitVfx(type, payload = {}) {
     try { this.onVfxEvent({ type, wave: this.currentWave, ...payload }); } catch {}
   }
@@ -471,6 +485,7 @@ export class CoreGameplayEngine {
     if (this.waveElapsed < 1.5) this.waveStartFxTimer = 1.25;
     this.emitVfx(this.currentWave === 10 ? 'boss-intro' : this.currentWave === 5 ? 'mini-boss-intro' : 'wave-start', { label: this.waveDef.label, final: this.currentWave === 10 });
     this.lastTime = performance.now();
+    this.frameAccumulatorMs = 0;
     this.raf = requestAnimationFrame((time) => this.frame(time));
   }
 
@@ -489,7 +504,10 @@ export class CoreGameplayEngine {
 
   resize() {
     const rect = this.canvas.getBoundingClientRect();
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const wasMobilePortrait = this.mobilePortrait;
+    this.mobilePortrait = isPortraitMobile();
+    const dprCap = this.mobilePortrait ? 1.5 : 2;
+    const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
     if (this.canvas.width !== width || this.canvas.height !== height) {
@@ -497,6 +515,9 @@ export class CoreGameplayEngine {
       this.canvas.height = height;
     }
     this.dpr = dpr;
+    if (!wasMobilePortrait && this.mobilePortrait && this.ambientParticles?.length > 28) {
+      this.ambientParticles = this.ambientParticles.slice(0, 28);
+    }
   }
 
   handleKeyDown(event) {
@@ -593,11 +614,30 @@ export class CoreGameplayEngine {
 
   frame(time) {
     if (!this.running) return;
-    const dt = Math.min(0.034, Math.max(0, (time - this.lastTime) / 1000));
+    const rawMs = Math.min(100, Math.max(0, time - this.lastTime));
     this.lastTime = time;
-    this.elapsed += dt;
-    this.update(dt);
-    this.draw();
+
+    if (this.mobilePortrait) {
+      this.frameAccumulatorMs = Math.min(this.targetFrameMs * 2, this.frameAccumulatorMs + rawMs);
+      if (this.frameAccumulatorMs + 0.01 < this.targetFrameMs) {
+        this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
+        return;
+      }
+      const steps = Math.min(2, Math.floor(this.frameAccumulatorMs / this.targetFrameMs));
+      for (let step = 0; step < steps; step += 1) {
+        const dt = this.targetFrameMs / 1000;
+        this.elapsed += dt;
+        this.update(dt);
+      }
+      this.frameAccumulatorMs -= steps * this.targetFrameMs;
+      this.draw();
+    } else {
+      const dt = Math.min(0.034, rawMs / 1000);
+      this.elapsed += dt;
+      this.update(dt);
+      this.draw();
+    }
+
     this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
   }
 
@@ -1313,7 +1353,7 @@ export class CoreGameplayEngine {
     // leaves a readable cyan engine ribbon that bends with lateral movement.
     vfx.trailClock -= dt;
     for (const point of vfx.trailPoints || []) point.age += dt;
-    vfx.trailPoints = (vfx.trailPoints || []).filter((point) => point.age < 0.24).slice(0, 10);
+    vfx.trailPoints = (vfx.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? 0.18 : 0.24)).slice(0, this.mobilePortrait ? 6 : 10);
     if (this.player.lives > 0 && this.player.respawnTimer <= 0 && vfx.trailClock <= 0) {
       vfx.trailPoints.unshift({
         x: this.player.x,
@@ -1322,13 +1362,13 @@ export class CoreGameplayEngine {
         age: 0,
         overdrive: this.overdriveTimer > 0
       });
-      vfx.trailPoints = vfx.trailPoints.slice(0, this.reducedMotion ? 4 : 9);
-      vfx.trailClock = this.reducedMotion ? 0.065 : (this.overdriveTimer > 0 ? 0.020 : 0.030);
+      vfx.trailPoints = vfx.trailPoints.slice(0, this.reducedMotion ? 4 : (this.mobilePortrait ? 5 : 9));
+      vfx.trailClock = this.reducedMotion ? 0.065 : (this.mobilePortrait ? (this.overdriveTimer > 0 ? 0.038 : 0.048) : (this.overdriveTimer > 0 ? 0.020 : 0.030));
     }
 
     vfx.thrusterClock -= dt;
     if (this.player.lives > 0 && this.player.respawnTimer <= 0 && vfx.thrusterClock <= 0) {
-      const count = this.reducedMotion ? 1 : (this.overdriveTimer > 0 ? 2 : 1);
+      const count = this.reducedMotion || this.mobilePortrait ? 1 : (this.overdriveTimer > 0 ? 2 : 1);
       for (let i = 0; i < count; i += 1) {
         this.thrusterParticles.push({
           x: this.player.x + (this.random() - 0.5) * 0.018,
@@ -1341,7 +1381,7 @@ export class CoreGameplayEngine {
           overdrive: this.overdriveTimer > 0
         });
       }
-      vfx.thrusterClock = this.reducedMotion ? 0.06 : (this.overdriveTimer > 0 ? 0.018 : 0.032);
+      vfx.thrusterClock = this.reducedMotion ? 0.06 : (this.mobilePortrait ? (this.overdriveTimer > 0 ? 0.036 : 0.052) : (this.overdriveTimer > 0 ? 0.018 : 0.032));
     }
 
     for (const particle of this.thrusterParticles) {
@@ -1351,7 +1391,7 @@ export class CoreGameplayEngine {
     }
     this.thrusterParticles = this.thrusterParticles
       .filter((particle) => particle.age < particle.duration && particle.y < 1.08)
-      .slice(-70);
+      .slice(-(this.mobilePortrait ? 34 : 70));
   }
 
   firePlayerBullet() {
@@ -1669,14 +1709,14 @@ export class CoreGameplayEngine {
       if (attacking && ['diver', 'charger', 'elite'].includes(enemy.type)) {
         enemy.trailClock = Number(enemy.trailClock || 0) - dt;
         if (enemy.trailClock <= 0) {
-          enemy.trailClock = enemy.type === 'charger' ? 0.035 : 0.055;
+          enemy.trailClock = this.mobilePortrait ? (enemy.type === 'charger' ? 0.060 : 0.085) : (enemy.type === 'charger' ? 0.035 : 0.055);
           enemy.trailPoints ||= [];
           enemy.trailPoints.unshift({ x: enemy.x, y: enemy.y, rotation: enemy.rotation ?? Math.PI, age: 0 });
-          enemy.trailPoints = enemy.trailPoints.slice(0, enemy.type === 'charger' ? 7 : 5);
+          enemy.trailPoints = enemy.trailPoints.slice(0, this.mobilePortrait ? (enemy.type === 'charger' ? 4 : 3) : (enemy.type === 'charger' ? 7 : 5));
         }
       }
       for (const point of enemy.trailPoints || []) point.age += dt;
-      enemy.trailPoints = (enemy.trailPoints || []).filter((point) => point.age < 0.32);
+      enemy.trailPoints = (enemy.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? 0.22 : 0.32));
 
       if (enemy.mode === 'formation') {
         enemy.rotation = Math.PI;
@@ -2369,7 +2409,7 @@ export class CoreGameplayEngine {
       const twinkle = this.reducedMotion ? 1 : 0.72 + Math.sin(this.elapsed * (1.8 + particle.layer) + particle.x * 17) * 0.28;
       ctx.globalAlpha = particle.alpha * twinkle;
       ctx.fillStyle = particle.layer === 2 ? '#bdefff' : '#74cfff';
-      ctx.shadowBlur = particle.layer === 2 ? 8 : 4;
+      ctx.shadowBlur = this.vfxGlow(particle.layer === 2 ? 8 : 4);
       ctx.shadowColor = '#57cfff';
       ctx.beginPath();
       ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -2390,7 +2430,7 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = alpha;
     this.ctx.strokeStyle = '#91f7ff';
     this.ctx.lineWidth = Math.max(2, dim.min * 0.006 * (1 - progress * 0.65));
-    this.ctx.shadowBlur = 24;
+    this.ctx.shadowBlur = this.vfxGlow(24);
     this.ctx.shadowColor = '#5ee6ff';
     this.ctx.beginPath();
     this.ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -2444,7 +2484,7 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = alpha;
     this.ctx.strokeStyle = primary;
     this.ctx.lineWidth = Math.max(2, dim.min * 0.007 * (1 - progress * 0.7));
-    this.ctx.shadowBlur = 28;
+    this.ctx.shadowBlur = this.vfxGlow(28);
     this.ctx.shadowColor = glow;
     for (let i = 0; i < 3; i += 1) {
       this.ctx.beginPath();
@@ -2483,7 +2523,7 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = fade * 0.84;
     this.ctx.strokeStyle = final ? '#ff8d64' : '#9df5ff';
     this.ctx.lineWidth = Math.max(1, dim.min * 0.0022);
-    this.ctx.shadowBlur = 18;
+    this.ctx.shadowBlur = this.vfxGlow(18);
     this.ctx.shadowColor = final ? '#ff5e3c' : '#5be8ff';
     this.ctx.beginPath();
     this.ctx.moveTo(0, y);
@@ -2522,7 +2562,7 @@ export class CoreGameplayEngine {
         this.ctx.globalAlpha = 0.10 + (i % 3) * 0.025;
         this.ctx.strokeStyle = i % 4 === 0 ? '#fff2aa' : '#73edff';
         this.ctx.lineWidth = Math.max(1, dim.min * 0.0018);
-        this.ctx.shadowBlur = 10;
+        this.ctx.shadowBlur = this.vfxGlow(10);
         this.ctx.shadowColor = '#5ee8ff';
         this.ctx.beginPath();
         this.ctx.moveTo(x, y);
@@ -2558,7 +2598,7 @@ export class CoreGameplayEngine {
       this.ctx.lineWidth = Math.max(1.5, dim.min * 0.0028);
       this.ctx.setLineDash([Math.max(7, dim.min * 0.018), Math.max(5, dim.min * 0.012)]);
       this.ctx.lineDashOffset = this.reducedMotion ? 0 : -this.elapsed * dim.min * 0.18;
-      this.ctx.shadowBlur = 15;
+      this.ctx.shadowBlur = this.vfxGlow(15);
       this.ctx.shadowColor = '#ff593d';
       for (const edge of [-1, 1]) {
         this.ctx.beginPath();
@@ -2609,7 +2649,7 @@ export class CoreGameplayEngine {
       this.ctx.fillRect(0, 0, dim.width, dim.height);
     }
     this.ctx.strokeStyle = '#c7fbff';
-    this.ctx.shadowBlur = 20;
+    this.ctx.shadowBlur = this.vfxGlow(20);
     this.ctx.shadowColor = '#5de6ff';
     this.ctx.lineCap = 'round';
     const rayAlpha = Math.sin(progress * Math.PI) * 0.34;
@@ -2667,7 +2707,7 @@ export class CoreGameplayEngine {
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = (1 - bombProgress) * 0.82;
       ctx.strokeStyle = '#dffcff';
-      ctx.shadowBlur = 30;
+      ctx.shadowBlur = this.vfxGlow(30);
       ctx.shadowColor = '#69e7ff';
       for (let ring = 0; ring < 3; ring += 1) {
         ctx.lineWidth = Math.max(2, dim.min * (0.007 - ring * 0.0015));
@@ -2777,7 +2817,7 @@ export class CoreGameplayEngine {
       this.ctx.save();
       this.ctx.globalCompositeOperation = 'lighter';
       this.ctx.globalAlpha = state.alpha * 0.52;
-      this.ctx.shadowBlur = 26;
+      this.ctx.shadowBlur = this.vfxGlow(26);
       this.ctx.shadowColor = '#ff8c57';
       this.drawSprite(this.images.miniBossPhaseAura, state.x, state.y, state.size * 1.26 * auraPulse, state.rotation * 0.18);
       this.ctx.restore();
@@ -2794,7 +2834,7 @@ export class CoreGameplayEngine {
       this.ctx.globalAlpha = state.alpha * (phase === 3 ? 0.26 : 0.18);
       this.ctx.strokeStyle = auraColor;
       this.ctx.lineWidth = Math.max(2, dim.min * 0.006);
-      this.ctx.shadowBlur = phase === 3 ? 24 : 18;
+      this.ctx.shadowBlur = this.vfxGlow(phase === 3 ? 24 : 18);
       this.ctx.shadowColor = auraColor;
       this.ctx.beginPath();
       this.ctx.ellipse(x, y, state.size * 0.46 * auraPulse, state.size * 0.24 * auraPulse, 0, 0, Math.PI * 2);
@@ -2812,7 +2852,7 @@ export class CoreGameplayEngine {
       enemy.trailPoints.forEach((point, index) => {
         const life = clamp(1 - Number(point.age || 0) / 0.32, 0, 1);
         this.ctx.globalAlpha = life * (enemy.type === 'charger' ? 0.22 : 0.14) * (1 - index * 0.06);
-        this.ctx.shadowBlur = 12;
+        this.ctx.shadowBlur = this.vfxGlow(12);
         this.ctx.shadowColor = palette.glow;
         this.drawSprite(image, point.x, point.y, state.size * (0.96 - index * 0.025), point.rotation ?? state.rotation);
       });
@@ -2856,7 +2896,7 @@ export class CoreGameplayEngine {
 
     this.ctx.save();
     this.ctx.globalAlpha = state.alpha;
-    this.ctx.shadowBlur = enemy.hitFlashTimer > 0 ? 24 : (enemy.type === 'elite' ? 13 : 8);
+    this.ctx.shadowBlur = this.vfxGlow(enemy.hitFlashTimer > 0 ? 24 : (enemy.type === 'elite' ? 13 : 8));
     this.ctx.shadowColor = enemy.hitFlashTimer > 0 ? '#ffffff' : palette.glow;
     if (enemy.hitFlashTimer > 0) this.ctx.globalCompositeOperation = 'lighter';
     this.drawSprite(image, state.x, state.y, state.size * (enemy.hitFlashTimer > 0 ? 1.035 : 1), state.rotation);
@@ -2890,7 +2930,7 @@ export class CoreGameplayEngine {
     const alpha = clamp(Number(enemy.hpReadTimer || 0) / 0.35, 0, 1);
     this.ctx.save();
     this.ctx.globalAlpha = 0.90 * alpha;
-    this.ctx.shadowBlur = 7;
+    this.ctx.shadowBlur = this.vfxGlow(7);
     this.ctx.shadowColor = palette.glow;
     for (let i = 0; i < shownSegments; i += 1) {
       this.ctx.fillStyle = i < filledSegments ? palette.spark : 'rgba(18,34,52,.72)';
@@ -2913,7 +2953,7 @@ export class CoreGameplayEngine {
     gradient.addColorStop(1, '#ffffffcc');
     this.ctx.strokeStyle = gradient;
     this.ctx.lineWidth = Math.max(1.5, dim.min * 0.006);
-    this.ctx.shadowBlur = 16;
+    this.ctx.shadowBlur = this.vfxGlow(16);
     this.ctx.shadowColor = palette.glow;
     this.ctx.beginPath();
     this.ctx.moveTo(x, y - length);
@@ -2966,7 +3006,7 @@ export class CoreGameplayEngine {
     this.ctx.strokeStyle = attack.kind === 'charge' ? '#ff6b55' : attack.kind === 'eliteAssault' ? '#ff72da' : palette.glow;
     this.ctx.lineWidth = Math.max(1, dim.min * 0.0022);
     this.ctx.setLineDash([dim.min * 0.010, dim.min * 0.009]);
-    this.ctx.shadowBlur = 10;
+    this.ctx.shadowBlur = this.vfxGlow(10);
     this.ctx.shadowColor = this.ctx.strokeStyle;
     this.ctx.beginPath();
     let started = false;
@@ -3002,7 +3042,7 @@ export class CoreGameplayEngine {
     this.ctx.strokeStyle = charge ? '#ff715d' : palette.glow;
     this.ctx.lineWidth = Math.max(1, dim.min * (charge ? 0.0045 : 0.0025));
     this.ctx.setLineDash(charge ? [dim.min * 0.025, dim.min * 0.012] : [dim.min * 0.012, dim.min * 0.010]);
-    this.ctx.shadowBlur = charge ? 18 : 12;
+    this.ctx.shadowBlur = this.vfxGlow(charge ? 18 : 12);
     this.ctx.shadowColor = charge ? '#ff4d38' : palette.glow;
     if (charge || !DANGEROUS_ROUTE_TELEGRAPHS.has(String(attack.kind || ''))) {
       this.ctx.beginPath();
@@ -3032,7 +3072,7 @@ export class CoreGameplayEngine {
     this.ctx.save();
     this.ctx.globalCompositeOperation = 'lighter';
     this.ctx.globalAlpha = 0.68 + progress * 0.30;
-    this.ctx.shadowBlur = 22;
+    this.ctx.shadowBlur = this.vfxGlow(22);
     this.ctx.shadowColor = enemy.type === 'elite' ? '#ff67e2' : '#ffab62';
     const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
     gradient.addColorStop(0, '#ffffff');
@@ -3070,7 +3110,7 @@ export class CoreGameplayEngine {
       this.ctx.globalCompositeOperation = effect.additive === false ? 'source-over' : 'lighter';
       const pulse = effect.pulse ? (0.78 + Math.sin(progress * Math.PI * 7) * 0.18) : 1;
       this.ctx.globalAlpha = clamp(fade * Number(effect.alphaMul || 1) * pulse, 0, 1);
-      this.ctx.shadowBlur = 20;
+      this.ctx.shadowBlur = this.vfxGlow(20);
       this.ctx.shadowColor = effect.shadowColor || palette.glow;
       this.drawSprite(image, effect.x, effect.y, size, Number(effect.rotation || 0) + progress * Math.PI * 2 * Number(effect.spin || 0));
       this.ctx.restore();
@@ -3083,7 +3123,7 @@ export class CoreGameplayEngine {
       this.ctx.globalCompositeOperation = 'lighter';
       this.ctx.globalAlpha = fade * (effect.kind === 'debris' ? 0.90 : 0.82);
       this.ctx.fillStyle = effect.color || palette.spark;
-      this.ctx.shadowBlur = effect.kind === 'debris' ? 10 : 7;
+      this.ctx.shadowBlur = this.vfxGlow(effect.kind === 'debris' ? 10 : 7);
       this.ctx.shadowColor = effect.color || palette.spark;
       if (effect.kind === 'debris') {
         this.ctx.translate(x, y);
@@ -3121,7 +3161,7 @@ export class CoreGameplayEngine {
       gradient.addColorStop(0.52, effect.color || palette.spark);
       gradient.addColorStop(1, 'rgba(255,255,255,0)');
       this.ctx.fillStyle = gradient;
-      this.ctx.shadowBlur = 28 * strength;
+      this.ctx.shadowBlur = this.vfxGlow(28 * strength);
       this.ctx.shadowColor = effect.color || palette.spark;
       this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.fill();
       this.ctx.restore();
@@ -3160,7 +3200,7 @@ export class CoreGameplayEngine {
       this.ctx.globalAlpha = fade * 0.88;
       this.ctx.strokeStyle = effect.color || palette.burst;
       this.ctx.lineWidth = Math.max(1.2, dim.min * 0.005 * fade);
-      this.ctx.shadowBlur = 16;
+      this.ctx.shadowBlur = this.vfxGlow(16);
       this.ctx.shadowColor = effect.color || palette.burst;
       this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.stroke();
       this.ctx.restore();
@@ -3174,7 +3214,7 @@ export class CoreGameplayEngine {
       this.ctx.globalAlpha = fade * 0.78;
       this.ctx.strokeStyle = effect.color || '#f05cff';
       this.ctx.lineWidth = Math.max(1.5, dim.min * 0.005 * fade);
-      this.ctx.shadowBlur = 18;
+      this.ctx.shadowBlur = this.vfxGlow(18);
       this.ctx.shadowColor = effect.color || '#f05cff';
       this.ctx.beginPath();
       this.ctx.moveTo(x - radius, y); this.ctx.lineTo(x + radius, y);
@@ -3195,7 +3235,7 @@ export class CoreGameplayEngine {
       this.ctx.textBaseline = 'middle';
       this.ctx.font = `900 ${Math.max(10, dim.min * (isCombo ? 0.030 : isRisk ? 0.020 : 0.024) * scale)}px system-ui, sans-serif`;
       this.ctx.fillStyle = effect.color || '#eefcff';
-      this.ctx.shadowBlur = isCombo ? 18 : isRisk ? 12 : 10;
+      this.ctx.shadowBlur = this.vfxGlow(isCombo ? 18 : isRisk ? 12 : 10);
       this.ctx.shadowColor = isCombo ? '#54e9ff' : isRisk ? '#ff8d55' : '#93efff';
       this.ctx.fillText(String(effect.text || ''), x, y - rise);
       this.ctx.restore();
@@ -3210,7 +3250,7 @@ export class CoreGameplayEngine {
       this.ctx.globalAlpha = fade * 0.88 * pulse;
       this.ctx.strokeStyle = '#ff9f67';
       this.ctx.lineWidth = Math.max(1.5, dim.min * 0.0035);
-      this.ctx.shadowBlur = 18;
+      this.ctx.shadowBlur = this.vfxGlow(18);
       this.ctx.shadowColor = '#ff6c46';
       this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.stroke();
       this.ctx.beginPath();
@@ -3230,7 +3270,7 @@ export class CoreGameplayEngine {
       this.ctx.globalAlpha = fade * 0.72;
       this.ctx.strokeStyle = palette.glow;
       this.ctx.lineWidth = Math.max(1, dim.min * 0.003);
-      this.ctx.shadowBlur = 14;
+      this.ctx.shadowBlur = this.vfxGlow(14);
       this.ctx.shadowColor = palette.glow;
       this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.stroke();
       this.ctx.restore();
@@ -3247,7 +3287,7 @@ export class CoreGameplayEngine {
       gradient.addColorStop(0.26, effect.charged ? '#ffd08f' : palette.spark);
       gradient.addColorStop(1, 'rgba(255,90,40,0)');
       this.ctx.fillStyle = gradient;
-      this.ctx.shadowBlur = effect.charged ? 20 : 12;
+      this.ctx.shadowBlur = this.vfxGlow(effect.charged ? 20 : 12);
       this.ctx.shadowColor = effect.charged ? '#ff8b4d' : palette.glow;
       this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.fill();
       this.ctx.restore();
@@ -3286,7 +3326,7 @@ export class CoreGameplayEngine {
     this.ctx.globalCompositeOperation = ['explosion', 'chargeImpact'].includes(effect.kind) ? 'lighter' : 'source-over';
     this.ctx.globalAlpha = effect.kind === 'warning' ? fade * 0.90 : fade;
     if (effect.kind === 'explosion') {
-      this.ctx.shadowBlur = 20;
+      this.ctx.shadowBlur = this.vfxGlow(20);
       this.ctx.shadowColor = effect.color || palette.burst;
     }
     this.drawSprite(image, effect.x, effect.y, size);
@@ -3302,20 +3342,24 @@ export class CoreGameplayEngine {
     const uy = screenVy / magnitude;
     const x = bullet.x * dim.width;
     const y = bullet.y * dim.height;
-    const tailLength = dim.min * length;
+    const tailLength = dim.min * length * (this.mobilePortrait ? 0.72 : 1);
     const tailX = x - ux * tailLength;
     const tailY = y - uy * tailLength;
-    const gradient = this.ctx.createLinearGradient(x, y, tailX, tailY);
-    gradient.addColorStop(0, color);
-    gradient.addColorStop(0.22, color);
-    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    let strokeStyle = color;
+    if (!this.mobilePortrait) {
+      const gradient = this.ctx.createLinearGradient(x, y, tailX, tailY);
+      gradient.addColorStop(0, color);
+      gradient.addColorStop(0.22, color);
+      gradient.addColorStop(1, 'rgba(0,0,0,0)');
+      strokeStyle = gradient;
+    }
     this.ctx.save();
     this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.globalAlpha = alpha;
-    this.ctx.strokeStyle = gradient;
+    this.ctx.globalAlpha = alpha * (this.mobilePortrait ? 0.72 : 1);
+    this.ctx.strokeStyle = strokeStyle;
     this.ctx.lineWidth = Math.max(1, dim.min * width);
     this.ctx.lineCap = 'round';
-    this.ctx.shadowBlur = this.reducedMotion ? glow * 0.45 : glow;
+    this.ctx.shadowBlur = this.vfxGlow(this.reducedMotion ? glow * 0.45 : glow);
     this.ctx.shadowColor = color;
     this.ctx.beginPath();
     this.ctx.moveTo(tailX, tailY);
@@ -3341,7 +3385,7 @@ export class CoreGameplayEngine {
       : 0;
     this.ctx.save();
     this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.shadowBlur = overdrive ? 20 : 12;
+    this.ctx.shadowBlur = this.vfxGlow(overdrive ? 20 : 12);
     this.ctx.shadowColor = '#6ce9ff';
     this.drawSprite(
       this.images[bullet.sprite] || this.images.playerBullet,
@@ -3359,13 +3403,15 @@ export class CoreGameplayEngine {
     const spec = PROJECTILE_VFX[sprite] || {};
     const color = bullet.trailColor || spec.color || (dangerous ? '#ffb36a' : '#ff704f');
     const pulse = 1 + Math.sin(Number(bullet.age || 0) * 28) * (this.reducedMotion ? 0.01 : (dangerous ? 0.05 : 0.025));
-    this.drawProjectileTrail(bullet, dim, {
-      color,
-      length: Number(spec.length || (dangerous ? 0.080 : 0.052)),
-      width: Number(spec.width || (dangerous ? 0.0125 : 0.008)),
-      glow: Number(spec.glow || (dangerous ? 20 : 13)),
-      alpha: dangerous ? 0.95 : 0.82
-    });
+    if (!this.mobilePortrait || dangerous) {
+      this.drawProjectileTrail(bullet, dim, {
+        color,
+        length: Number(spec.length || (dangerous ? 0.080 : 0.052)),
+        width: Number(spec.width || (dangerous ? 0.0125 : 0.008)),
+        glow: Number(spec.glow || (dangerous ? 20 : 13)),
+        alpha: dangerous ? 0.95 : 0.82
+      });
+    }
     const screenVx = Number(bullet.vx || 0) * dim.width;
     const screenVy = Number(bullet.vy || 0) * dim.height;
     const rotation = Math.hypot(screenVx, screenVy) > 0.00001
@@ -3375,7 +3421,7 @@ export class CoreGameplayEngine {
     const sizeScale = Number(spec.scale || 1) * Number(bullet.sizeMul || bullet.scale || 1) * (bullet.charged ? 1.18 : 1) * dangerReadabilityScale;
     this.ctx.save();
     this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.shadowBlur = Number(spec.glow || (dangerous ? 18 : 10));
+    this.ctx.shadowBlur = this.vfxGlow(Number(spec.glow || (dangerous ? 18 : 10)));
     this.ctx.shadowColor = color;
     this.drawSprite(
       this.images[bullet.sprite] || this.images.fighterBullet,
@@ -3399,7 +3445,7 @@ export class CoreGameplayEngine {
       const y = particle.y * dim.height;
       this.ctx.globalAlpha = alpha;
       this.ctx.fillStyle = particle.overdrive ? '#dcffff' : '#63ddff';
-      this.ctx.shadowBlur = particle.overdrive ? 16 : 10;
+      this.ctx.shadowBlur = this.vfxGlow(particle.overdrive ? 16 : 10);
       this.ctx.shadowColor = '#4fd8ff';
       this.ctx.beginPath();
       this.ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -3431,7 +3477,7 @@ export class CoreGameplayEngine {
       this.ctx.globalAlpha = (overdrive ? 0.72 : 0.48) * newestLife;
       this.ctx.strokeStyle = overdrive ? '#c9ffff' : '#60ddff';
       this.ctx.lineWidth = Math.max(1.25, dim.min * (overdrive ? 0.0060 : 0.0042));
-      this.ctx.shadowBlur = overdrive ? 22 : 14;
+      this.ctx.shadowBlur = this.vfxGlow(overdrive ? 22 : 14);
       this.ctx.shadowColor = '#55dfff';
       this.ctx.stroke(path);
     }
@@ -3454,7 +3500,7 @@ export class CoreGameplayEngine {
     this.ctx.save();
     this.ctx.globalCompositeOperation = 'lighter';
     this.ctx.fillStyle = gradient;
-    this.ctx.shadowBlur = overdrive ? 24 : 16;
+    this.ctx.shadowBlur = this.vfxGlow(overdrive ? 24 : 16);
     this.ctx.shadowColor = '#54dcff';
     this.ctx.beginPath();
     this.ctx.moveTo(x - halfWidth, y);
@@ -3481,7 +3527,7 @@ export class CoreGameplayEngine {
       gradient.addColorStop(1, 'rgba(49,166,255,0)');
       this.ctx.globalAlpha = timer;
       this.ctx.fillStyle = gradient;
-      this.ctx.shadowBlur = 18;
+      this.ctx.shadowBlur = this.vfxGlow(18);
       this.ctx.shadowColor = '#78edff';
       this.ctx.beginPath();
       this.ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -3515,7 +3561,7 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = timer * 0.92;
     this.ctx.strokeStyle = '#ffb59d';
     this.ctx.lineWidth = Math.max(2, dim.min * 0.006 * timer);
-    this.ctx.shadowBlur = 18;
+    this.ctx.shadowBlur = this.vfxGlow(18);
     this.ctx.shadowColor = '#ff6d58';
     this.ctx.beginPath();
     this.ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -3566,10 +3612,10 @@ export class CoreGameplayEngine {
         gradient.addColorStop(1, '#4ba7ff');
       }
       this.ctx.fillStyle = gradient;
-      this.ctx.shadowBlur = final ? 14 : 11;
+      this.ctx.shadowBlur = this.vfxGlow(final ? 14 : 11);
       this.ctx.shadowColor = final ? 'rgba(255,97,55,.72)' : 'rgba(79,224,255,.70)';
       this.ctx.fillRect(x + 2, y + 2, fillWidth, Math.max(1, height - 4));
-      this.ctx.shadowBlur = 0;
+      this.ctx.shadowBlur = this.vfxGlow(0);
     }
 
     this.ctx.strokeStyle = final ? 'rgba(255, 132, 76, .92)' : 'rgba(99, 222, 255, .88)';
@@ -3592,7 +3638,7 @@ export class CoreGameplayEngine {
     this.ctx.font = `800 ${Math.max(10, dim.min * 0.020)}px system-ui, sans-serif`;
     this.ctx.textAlign = 'center';
     this.ctx.fillStyle = final ? '#fff0dd' : '#e9fbff';
-    this.ctx.shadowBlur = 9;
+    this.ctx.shadowBlur = this.vfxGlow(9);
     this.ctx.shadowColor = final ? 'rgba(255,112,64,.55)' : 'rgba(89,220,255,.45)';
     const label = final ? `FINAL BOSS  •  PHASE ${phase}  •  ${percent}%` : `MINI BOSS  •  PHASE ${phase}  •  ${percent}%`;
     this.ctx.fillText(label, dim.width * 0.5, labelY);
@@ -3607,7 +3653,7 @@ export class CoreGameplayEngine {
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';
     this.ctx.font = `700 ${Math.max(13, dim.min * 0.035)}px system-ui, sans-serif`;
-    this.ctx.shadowBlur = 12;
+    this.ctx.shadowBlur = this.vfxGlow(12);
     this.ctx.shadowColor = '#5ee7ff';
     this.ctx.fillStyle = '#e9fbff';
     this.ctx.fillText(text, dim.width * 0.5, dim.height * 0.48);

@@ -3920,3 +3920,34 @@ html[data-orientation="landscape"] .main-menu-screen .screen-bg.bg-landscape {
     padding: 48px 30px 42px !important;
   }
 }
+
+
+/* =========================================================
+   PATCH 1 — PORTRAIT MOBILE RENDER OPTIMIZATION
+   Cosmetic-only reductions for coarse-pointer portrait devices.
+   Gameplay timing, collisions, difficulty, fire rate and balance stay unchanged.
+   ========================================================= */
+@media (orientation: portrait) and (pointer: coarse) {
+  .gameplay-screen .core-stats-panel,
+  .gameplay-screen .ability-panel,
+  .gameplay-screen .multiplier-chip,
+  .gameplay-screen .control-hint,
+  .gameplay-screen .audio-settings-overlay {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
+  .gameplay-screen .ship-shell,
+  .gameplay-screen .enemy-preview {
+    filter: none !important;
+  }
+
+  .gameplay-screen.overdrive-live .game-canvas {
+    filter: none !important;
+  }
+
+  .gameplay-screen .core-stats-panel,
+  .gameplay-screen .ability-panel {
+    box-shadow: none !important;
+  }
+}
