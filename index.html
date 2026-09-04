@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
     <meta name="theme-color" content="#020611" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="preload" as="image" href="/assets/mainmenu/background-portrait.png" media="(orientation: portrait)" fetchpriority="high" />
     <title>Galaga Skill Wager</title>
     <style>
       html,body,#app{margin:0;min-width:100%;min-height:100%;background:#020611}
@@ -17,6 +18,9 @@
       .startup-loader-track span{display:block;width:0;height:100%;border-radius:999px;background:linear-gradient(90deg,#1968d4 0%,#24a9ff 45%,#7aefff 100%);box-shadow:0 0 22px rgba(70,216,255,.85);transition:width .18s ease-out}
       .startup-loader-percent{min-width:72px;color:#dff8ff;font-size:clamp(22px,3vw,38px);font-weight:1000;letter-spacing:.05em;text-shadow:0 0 14px rgba(67,214,255,.75)}
       .startup-loader-count{color:rgba(225,244,255,.88);font-size:clamp(11px,1.45vw,15px);font-weight:700;letter-spacing:.10em;text-shadow:0 0 8px rgba(35,157,230,.35)}
+      @media (orientation:portrait){
+        .startup-loader{background-image:url('/assets/mainmenu/background-portrait.png');background-position:center center;background-size:cover}
+      }
       @media (max-width:640px){
         .startup-loader{padding:20px 14px 28px}
         .startup-loader-core{gap:10px}

@@ -319,6 +319,21 @@ export class CoreGameplayEngine {
     this.mobilePortrait = isPortraitMobile();
     this.targetFrameMs = 1000 / 60;
     this.frameAccumulatorMs = 0;
+
+    // Patch 2 — mobile input + adaptive presentation budget. Pointer events only
+    // enqueue the latest X coordinate; gameplay consumes it once per rendered frame.
+    // This avoids a layout read + player mutation for every Safari pointermove event.
+    this.canvasRect = null;
+    this.pendingPointerClientX = null;
+    this.pendingPointerId = null;
+
+    // Presentation-only adaptive VFX. Levels: 0 = Patch-1 quality, 1 = balanced,
+    // 2 = low-cost. It never changes simulation speed, collision, fire rate or AI.
+    this.adaptiveVfxLevel = 0;
+    this.renderFrameEmaMs = this.targetFrameMs;
+    this.lastRenderSampleTime = 0;
+    this.slowRenderMs = 0;
+    this.fastRenderMs = 0;
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -437,6 +452,7 @@ export class CoreGameplayEngine {
     this.patternDirector.lastPattern = String(options.initialState?.lastPattern || '');
 
     this.boundResize = () => this.resize();
+    this.boundViewportResize = () => this.resize();
     this.boundKeyDown = (event) => this.handleKeyDown(event);
     this.boundKeyUp = (event) => this.handleKeyUp(event);
     this.boundPointerDown = (event) => this.handlePointerDown(event);
@@ -444,9 +460,82 @@ export class CoreGameplayEngine {
     this.boundPointerUp = (event) => this.handlePointerUp(event);
   }
 
+  adaptiveVfxScale() {
+    if (!this.mobilePortrait) return 1;
+    if (this.adaptiveVfxLevel >= 2) return 0.54;
+    if (this.adaptiveVfxLevel === 1) return 0.76;
+    return 1;
+  }
+
   vfxGlow(value) {
     const numeric = Math.max(0, Number(value) || 0);
-    return this.mobilePortrait ? numeric * 0.58 : numeric;
+    return this.mobilePortrait ? numeric * 0.58 * this.adaptiveVfxScale() : numeric;
+  }
+
+  cacheCanvasRect(force = false) {
+    if (force || !this.canvasRect) this.canvasRect = this.canvas.getBoundingClientRect();
+    return this.canvasRect;
+  }
+
+  queuePointerSample(event) {
+    let sample = event;
+    if (typeof event.getCoalescedEvents === 'function') {
+      const samples = event.getCoalescedEvents();
+      if (samples?.length) sample = samples[samples.length - 1];
+    }
+    this.pendingPointerClientX = Number(sample.clientX);
+    this.pendingPointerId = event.pointerId;
+  }
+
+  flushPointerInput() {
+    if (!Number.isFinite(this.pendingPointerClientX)) return;
+    const clientX = this.pendingPointerClientX;
+    this.pendingPointerClientX = null;
+    if (this.player.respawnTimer > 0 || this.player.lives <= 0) return;
+    const rect = this.cacheCanvasRect();
+    const x = (clientX - rect.left) / Math.max(1, rect.width);
+    this.player.x = clamp(x, 0.055, 0.945);
+  }
+
+  observeRenderPerformance(time) {
+    if (!this.mobilePortrait) {
+      this.adaptiveVfxLevel = 0;
+      this.lastRenderSampleTime = time;
+      this.slowRenderMs = 0;
+      this.fastRenderMs = 0;
+      return;
+    }
+    if (!this.lastRenderSampleTime) {
+      this.lastRenderSampleTime = time;
+      return;
+    }
+
+    const frameMs = Math.min(80, Math.max(8, time - this.lastRenderSampleTime));
+    this.lastRenderSampleTime = time;
+    this.renderFrameEmaMs = this.renderFrameEmaMs * 0.90 + frameMs * 0.10;
+
+    // Degrade quickly after sustained missed 60fps frames; recover deliberately
+    // so quality does not oscillate every few seconds on mobile Safari.
+    if (this.renderFrameEmaMs > 22.5) {
+      this.slowRenderMs += frameMs;
+      this.fastRenderMs = Math.max(0, this.fastRenderMs - frameMs * 2);
+      if (this.slowRenderMs >= 1200 && this.adaptiveVfxLevel < 2) {
+        this.adaptiveVfxLevel += 1;
+        this.slowRenderMs = 0;
+        this.fastRenderMs = 0;
+      }
+    } else if (this.renderFrameEmaMs < 18.4) {
+      this.fastRenderMs += frameMs;
+      this.slowRenderMs = Math.max(0, this.slowRenderMs - frameMs * 2);
+      if (this.fastRenderMs >= 6000 && this.adaptiveVfxLevel > 0) {
+        this.adaptiveVfxLevel -= 1;
+        this.fastRenderMs = 0;
+        this.slowRenderMs = 0;
+      }
+    } else {
+      this.slowRenderMs = Math.max(0, this.slowRenderMs - frameMs * 0.5);
+      this.fastRenderMs = Math.max(0, this.fastRenderMs - frameMs * 0.5);
+    }
   }
 
   emitVfx(type, payload = {}) {
@@ -474,7 +563,13 @@ export class CoreGameplayEngine {
     if (this.running) return;
     this.running = true;
     this.resize();
+    this.cacheCanvasRect(true);
+    this.lastRenderSampleTime = 0;
+    this.renderFrameEmaMs = this.targetFrameMs;
+    this.slowRenderMs = 0;
+    this.fastRenderMs = 0;
     window.addEventListener('resize', this.boundResize, { passive: true });
+    window.visualViewport?.addEventListener('resize', this.boundViewportResize, { passive: true });
     window.addEventListener('keydown', this.boundKeyDown, { passive: false });
     window.addEventListener('keyup', this.boundKeyUp, { passive: false });
     this.canvas.addEventListener('pointerdown', this.boundPointerDown, { passive: false });
@@ -494,16 +589,20 @@ export class CoreGameplayEngine {
     this.running = false;
     cancelAnimationFrame(this.raf);
     window.removeEventListener('resize', this.boundResize);
+    window.visualViewport?.removeEventListener('resize', this.boundViewportResize);
     window.removeEventListener('keydown', this.boundKeyDown);
     window.removeEventListener('keyup', this.boundKeyUp);
     this.canvas.removeEventListener('pointerdown', this.boundPointerDown);
     this.canvas.removeEventListener('pointermove', this.boundPointerMove);
     this.canvas.removeEventListener('pointerup', this.boundPointerUp);
     this.canvas.removeEventListener('pointercancel', this.boundPointerUp);
+    this.pendingPointerClientX = null;
+    this.pendingPointerId = null;
+    this.canvasRect = null;
   }
 
   resize() {
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.cacheCanvasRect(true);
     const wasMobilePortrait = this.mobilePortrait;
     this.mobilePortrait = isPortraitMobile();
     const dprCap = this.mobilePortrait ? 1.5 : 2;
@@ -517,6 +616,13 @@ export class CoreGameplayEngine {
     this.dpr = dpr;
     if (!wasMobilePortrait && this.mobilePortrait && this.ambientParticles?.length > 28) {
       this.ambientParticles = this.ambientParticles.slice(0, 28);
+    }
+    if (wasMobilePortrait !== this.mobilePortrait) {
+      this.adaptiveVfxLevel = 0;
+      this.renderFrameEmaMs = this.targetFrameMs;
+      this.lastRenderSampleTime = 0;
+      this.slowRenderMs = 0;
+      this.fastRenderMs = 0;
     }
   }
 
@@ -536,28 +642,23 @@ export class CoreGameplayEngine {
   handlePointerDown(event) {
     event.preventDefault();
     this.pointerId = event.pointerId;
+    this.cacheCanvasRect(true);
     this.canvas.setPointerCapture?.(event.pointerId);
-    this.movePlayerToPointer(event);
+    this.queuePointerSample(event);
   }
 
   handlePointerMove(event) {
     if (this.pointerId !== event.pointerId) return;
     event.preventDefault();
-    this.movePlayerToPointer(event);
+    this.queuePointerSample(event);
   }
 
   handlePointerUp(event) {
     if (this.pointerId !== event.pointerId) return;
     event.preventDefault();
+    this.queuePointerSample(event);
     this.pointerId = null;
     this.canvas.releasePointerCapture?.(event.pointerId);
-  }
-
-  movePlayerToPointer(event) {
-    if (this.player.respawnTimer > 0 || this.player.lives <= 0) return;
-    const rect = this.canvas.getBoundingClientRect();
-    const x = (event.clientX - rect.left) / Math.max(1, rect.width);
-    this.player.x = clamp(x, 0.055, 0.945);
   }
 
   spawnFormation() {
@@ -624,6 +725,7 @@ export class CoreGameplayEngine {
         return;
       }
       const steps = Math.min(2, Math.floor(this.frameAccumulatorMs / this.targetFrameMs));
+      this.flushPointerInput();
       for (let step = 0; step < steps; step += 1) {
         const dt = this.targetFrameMs / 1000;
         this.elapsed += dt;
@@ -631,11 +733,14 @@ export class CoreGameplayEngine {
       }
       this.frameAccumulatorMs -= steps * this.targetFrameMs;
       this.draw();
+      this.observeRenderPerformance(time);
     } else {
+      this.flushPointerInput();
       const dt = Math.min(0.034, rawMs / 1000);
       this.elapsed += dt;
       this.update(dt);
       this.draw();
+      this.observeRenderPerformance(time);
     }
 
     this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
@@ -1351,9 +1456,14 @@ export class CoreGameplayEngine {
 
     // VFX Patch 2: retain a short presentation-only history so the player ship
     // leaves a readable cyan engine ribbon that bends with lateral movement.
+    const adaptiveLevel = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
+    const portraitTrailLife = adaptiveLevel >= 2 ? 0.12 : adaptiveLevel === 1 ? 0.15 : 0.18;
+    const portraitTrailCap = adaptiveLevel >= 2 ? 3 : adaptiveLevel === 1 ? 4 : 5;
+    const adaptiveIntervalScale = adaptiveLevel >= 2 ? 1.75 : adaptiveLevel === 1 ? 1.35 : 1;
+
     vfx.trailClock -= dt;
     for (const point of vfx.trailPoints || []) point.age += dt;
-    vfx.trailPoints = (vfx.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? 0.18 : 0.24)).slice(0, this.mobilePortrait ? 6 : 10);
+    vfx.trailPoints = (vfx.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? portraitTrailLife : 0.24)).slice(0, this.mobilePortrait ? portraitTrailCap + 1 : 10);
     if (this.player.lives > 0 && this.player.respawnTimer <= 0 && vfx.trailClock <= 0) {
       vfx.trailPoints.unshift({
         x: this.player.x,
@@ -1362,8 +1472,9 @@ export class CoreGameplayEngine {
         age: 0,
         overdrive: this.overdriveTimer > 0
       });
-      vfx.trailPoints = vfx.trailPoints.slice(0, this.reducedMotion ? 4 : (this.mobilePortrait ? 5 : 9));
-      vfx.trailClock = this.reducedMotion ? 0.065 : (this.mobilePortrait ? (this.overdriveTimer > 0 ? 0.038 : 0.048) : (this.overdriveTimer > 0 ? 0.020 : 0.030));
+      vfx.trailPoints = vfx.trailPoints.slice(0, this.reducedMotion ? 4 : (this.mobilePortrait ? portraitTrailCap : 9));
+      const baseTrailInterval = this.overdriveTimer > 0 ? 0.038 : 0.048;
+      vfx.trailClock = this.reducedMotion ? 0.065 : (this.mobilePortrait ? baseTrailInterval * adaptiveIntervalScale : (this.overdriveTimer > 0 ? 0.020 : 0.030));
     }
 
     vfx.thrusterClock -= dt;
@@ -1381,7 +1492,8 @@ export class CoreGameplayEngine {
           overdrive: this.overdriveTimer > 0
         });
       }
-      vfx.thrusterClock = this.reducedMotion ? 0.06 : (this.mobilePortrait ? (this.overdriveTimer > 0 ? 0.036 : 0.052) : (this.overdriveTimer > 0 ? 0.018 : 0.032));
+      const baseThrusterInterval = this.overdriveTimer > 0 ? 0.036 : 0.052;
+      vfx.thrusterClock = this.reducedMotion ? 0.06 : (this.mobilePortrait ? baseThrusterInterval * adaptiveIntervalScale : (this.overdriveTimer > 0 ? 0.018 : 0.032));
     }
 
     for (const particle of this.thrusterParticles) {
@@ -1389,9 +1501,10 @@ export class CoreGameplayEngine {
       particle.x += particle.vx * dt;
       particle.y += particle.vy * dt;
     }
+    const portraitThrusterCap = adaptiveLevel >= 2 ? 16 : adaptiveLevel === 1 ? 24 : 34;
     this.thrusterParticles = this.thrusterParticles
       .filter((particle) => particle.age < particle.duration && particle.y < 1.08)
-      .slice(-(this.mobilePortrait ? 34 : 70));
+      .slice(-(this.mobilePortrait ? portraitThrusterCap : 70));
   }
 
   firePlayerBullet() {
@@ -1709,14 +1822,21 @@ export class CoreGameplayEngine {
       if (attacking && ['diver', 'charger', 'elite'].includes(enemy.type)) {
         enemy.trailClock = Number(enemy.trailClock || 0) - dt;
         if (enemy.trailClock <= 0) {
-          enemy.trailClock = this.mobilePortrait ? (enemy.type === 'charger' ? 0.060 : 0.085) : (enemy.type === 'charger' ? 0.035 : 0.055);
+          const level = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
+          const intervalScale = level >= 2 ? 1.8 : level === 1 ? 1.35 : 1;
+          enemy.trailClock = this.mobilePortrait
+            ? (enemy.type === 'charger' ? 0.060 : 0.085) * intervalScale
+            : (enemy.type === 'charger' ? 0.035 : 0.055);
           enemy.trailPoints ||= [];
           enemy.trailPoints.unshift({ x: enemy.x, y: enemy.y, rotation: enemy.rotation ?? Math.PI, age: 0 });
-          enemy.trailPoints = enemy.trailPoints.slice(0, this.mobilePortrait ? (enemy.type === 'charger' ? 4 : 3) : (enemy.type === 'charger' ? 7 : 5));
+          const portraitCap = level >= 2 ? (enemy.type === 'charger' ? 2 : 1) : level === 1 ? (enemy.type === 'charger' ? 3 : 2) : (enemy.type === 'charger' ? 4 : 3);
+          enemy.trailPoints = enemy.trailPoints.slice(0, this.mobilePortrait ? portraitCap : (enemy.type === 'charger' ? 7 : 5));
         }
       }
       for (const point of enemy.trailPoints || []) point.age += dt;
-      enemy.trailPoints = (enemy.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? 0.22 : 0.32));
+      const level = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
+      const portraitLife = level >= 2 ? 0.14 : level === 1 ? 0.18 : 0.22;
+      enemy.trailPoints = (enemy.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? portraitLife : 0.32));
 
       if (enemy.mode === 'formation') {
         enemy.rotation = Math.PI;
@@ -2398,8 +2518,12 @@ export class CoreGameplayEngine {
     if (!this.ambientParticles?.length) return;
     const { ctx } = this;
     ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    for (const particle of this.ambientParticles) {
+    ctx.globalCompositeOperation = this.mobilePortrait && this.adaptiveVfxLevel >= 2 ? 'source-over' : 'lighter';
+    const particleLimit = this.mobilePortrait
+      ? Math.min(this.ambientParticles.length, this.adaptiveVfxLevel >= 2 ? 14 : this.adaptiveVfxLevel === 1 ? 20 : 28)
+      : this.ambientParticles.length;
+    for (let particleIndex = 0; particleIndex < particleLimit; particleIndex += 1) {
+      const particle = this.ambientParticles[particleIndex];
       const depth = 0.65 + particle.layer * 0.25;
       const yNorm = (particle.y + this.elapsed * particle.speed * depth) % 1;
       const xNorm = (particle.x + Math.sin(this.elapsed * (0.18 + particle.layer * 0.06) + particle.y * 9) * particle.drift + 1) % 1;
@@ -2846,7 +2970,8 @@ export class CoreGameplayEngine {
     }
 
     // Motion after-images make dives/charges readable without adding new art assets.
-    if (attacking && enemy.trailPoints?.length) {
+    const allowMotionAfterImages = !this.mobilePortrait || this.adaptiveVfxLevel < 2 || enemy.type === 'charger';
+    if (attacking && enemy.trailPoints?.length && allowMotionAfterImages) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = 'lighter';
       enemy.trailPoints.forEach((point, index) => {
