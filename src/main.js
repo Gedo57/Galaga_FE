@@ -510,6 +510,10 @@ function addCinematicOverlay({ kicker = '', title = '', subtitle = '', tone = 'c
   layer.appendChild(node);
   window.setTimeout(() => node.remove(), duration);
 }
+function isPortraitMobileVfx() {
+  return Boolean(window.matchMedia?.('(orientation: portrait)')?.matches && window.matchMedia?.('(pointer: coarse)')?.matches);
+}
+
 function addRadialOverlay(className, duration = 900) {
   const layer = app.querySelector('[data-feedback-layer]');
   if (!layer) return;
@@ -551,16 +555,22 @@ function handleVfxEvent(event = {}) {
     addRadialOverlay('boss-destroyed-burst', 1350);
     addCinematicOverlay({ kicker: 'TARGET ELIMINATED', title: 'BOSS DESTROYED', subtitle: 'RUN COMPLETE', tone: 'victory', duration: 1500 });
   } else if (type === 'bomb') {
-    screen.classList.remove('bomb-live'); void screen.offsetWidth; screen.classList.add('bomb-live');
-    addRadialOverlay('bomb-dom-rings', 850);
-    pulseHud('.bomb-button', 'ability-pop', 700);
-    window.setTimeout(() => screen.classList.remove('bomb-live'), 850);
+    const portraitMobile = isPortraitMobileVfx();
+    if (!portraitMobile) {
+      screen.classList.remove('bomb-live'); void screen.offsetWidth; screen.classList.add('bomb-live');
+      addRadialOverlay('bomb-dom-rings', 850);
+      window.setTimeout(() => screen.classList.remove('bomb-live'), 850);
+    }
+    pulseHud('.bomb-button', 'ability-pop', portraitMobile ? 420 : 700);
   } else if (type === 'overdrive-start') {
-    screen.classList.remove('overdrive-burst'); void screen.offsetWidth; screen.classList.add('overdrive-burst');
-    addRadialOverlay('overdrive-dom-rings', 950);
-    pulseHud('.overdrive-box', 'ability-pop', 760);
-    pulseHud('.gameplay-hud', 'hud-energy-pop', 760);
-    window.setTimeout(() => screen.classList.remove('overdrive-burst'), 1000);
+    const portraitMobile = isPortraitMobileVfx();
+    if (!portraitMobile) {
+      screen.classList.remove('overdrive-burst'); void screen.offsetWidth; screen.classList.add('overdrive-burst');
+      addRadialOverlay('overdrive-dom-rings', 950);
+      pulseHud('.gameplay-hud', 'hud-energy-pop', 760);
+      window.setTimeout(() => screen.classList.remove('overdrive-burst'), 1000);
+    }
+    pulseHud('.overdrive-box', 'ability-pop', portraitMobile ? 460 : 760);
   } else if (type === 'player-hit') {
     pulseHud('[data-hud-lives]', 'hud-danger-pop', 520);
     pulseHud('.gameplay-hud', 'hud-hit-pop', 520);

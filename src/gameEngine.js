@@ -372,6 +372,11 @@ export class CoreGameplayEngine {
     this.bombAvailable = options.initialState?.bombAvailable !== false && !Boolean(options.initialState?.bombUsed);
     this.bombUsed = Boolean(options.initialState?.bombUsed);
     this.bombFlashTimer = 0;
+    // Patch 6: portrait-only special-ability VFX budgets. These counters never
+    // affect bomb damage, enemy HP, score, overdrive fire rate or timers.
+    this.bombVfxEffectBudget = Number.POSITIVE_INFINITY;
+    this.bombVfxDetailedRemaining = Number.POSITIVE_INFINITY;
+    this.bombSnapshotTimer = 0;
     this.bossLaser = null;
     this.miniBossScript = { phase: 1, step: 0, timer: 1.15, safeGapSide: -1 };
     this.finalBossScript = { phase: 1, step: 0, timer: 1.25, safeGapSide: -1, laserSide: -1 };
@@ -458,6 +463,13 @@ export class CoreGameplayEngine {
       this.fastRenderMs = 0;
       return;
     }
+
+    // Patch 6: Overdrive keeps the portrait renderer at least on the balanced
+    // cosmetic profile for its seven-second lifetime. Simulation stays at full
+    // fidelity; only presentation work is reduced.
+    const adaptiveFloor = this.overdriveTimer > 0 ? 1 : 0;
+    if (this.adaptiveVfxLevel < adaptiveFloor) this.adaptiveVfxLevel = adaptiveFloor;
+
     if (!this.lastRenderSampleTime) {
       this.lastRenderSampleTime = time;
       return;
@@ -480,8 +492,8 @@ export class CoreGameplayEngine {
     } else if (this.renderFrameEmaMs < 18.4) {
       this.fastRenderMs += frameMs;
       this.slowRenderMs = Math.max(0, this.slowRenderMs - frameMs * 2);
-      if (this.fastRenderMs >= 6000 && this.adaptiveVfxLevel > 0) {
-        this.adaptiveVfxLevel -= 1;
+      if (this.fastRenderMs >= 6000 && this.adaptiveVfxLevel > adaptiveFloor) {
+        this.adaptiveVfxLevel = Math.max(adaptiveFloor, this.adaptiveVfxLevel - 1);
         this.fastRenderMs = 0;
         this.slowRenderMs = 0;
       }
@@ -552,6 +564,10 @@ export class CoreGameplayEngine {
     this.pendingPointerClientX = null;
     this.pendingPointerId = null;
     this.canvasRect = null;
+    if (this.bombSnapshotTimer) {
+      window.clearTimeout(this.bombSnapshotTimer);
+      this.bombSnapshotTimer = 0;
+    }
   }
 
   resize() {
@@ -754,6 +770,7 @@ export class CoreGameplayEngine {
     if (this.overdriveEnergy >= 100) {
       this.overdriveEnergy = 0;
       this.overdriveTimer = 7;
+      if (this.mobilePortrait) this.adaptiveVfxLevel = Math.max(1, this.adaptiveVfxLevel);
       this.overdriveBurstTimer = 0.95;
       this.patternBanner = { label: 'OVERDRIVE', timer: 1.35 };
       this.triggerShake(0.42, 0.24);
@@ -766,21 +783,45 @@ export class CoreGameplayEngine {
     this.bombAvailable = false;
     this.bombUsed = true;
     this.bombFlashTimer = 0.82;
-    this.triggerShake(1.10, 0.42);
-    this.triggerVisualFreeze(0.075);
+    this.triggerShake(this.mobilePortrait ? 0.82 : 1.10, this.mobilePortrait ? 0.30 : 0.42);
+    this.triggerVisualFreeze(this.mobilePortrait ? 0.045 : 0.075);
     this.emitVfx('bomb', { x: this.player.x, y: this.player.y });
     this.enemyBullets = [];
     this.bossLaser = null;
+
+    // Portrait Safari can stall when every destroyed enemy creates a complete
+    // layered death stack in the same frame. Keep the exact bomb gameplay but
+    // cap presentation work to a predictable budget.
+    this.bombVfxEffectBudget = this.mobilePortrait ? 32 : Number.POSITIVE_INFINITY;
+    this.bombVfxDetailedRemaining = this.mobilePortrait ? 3 : Number.POSITIVE_INFINITY;
     this.effects.push({ x: this.player.x, y: this.player.y - 0.04, age: 0, duration: 0.62, kind: 'bomb' });
+    let portraitHitFlashes = 0;
     for (const enemy of [...this.enemies]) {
       if (!enemy.alive) continue;
       enemy.hp = Math.max(0, Number(enemy.hp || 1) - 1);
-      this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: 0.20, kind: 'hit' });
-      if (enemy.hp <= 0) this.killEnemyByBomb(enemy);
+      if (enemy.hp <= 0) {
+        this.killEnemyByBomb(enemy);
+      } else if (!this.mobilePortrait || portraitHitFlashes < 4) {
+        this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: 0.20, kind: 'hit' });
+        portraitHitFlashes += 1;
+      }
     }
     this.patternBanner = { label: 'BOMB', timer: 1.0 };
     this.emitHud();
-    this.onSnapshot(this.snapshot(), { reason: 'bomb' });
+
+    // Patch 6: let the first bomb frames render before network serialization and
+    // fetch callbacks begin on mobile. State is identical; only the flush timing
+    // moves by ~120 ms.
+    const bombSnapshot = this.snapshot();
+    if (this.mobilePortrait) {
+      if (this.bombSnapshotTimer) window.clearTimeout(this.bombSnapshotTimer);
+      this.bombSnapshotTimer = window.setTimeout(() => {
+        this.bombSnapshotTimer = 0;
+        if (this.running && !this.waveClearPending) this.onSnapshot(bombSnapshot, { reason: 'bomb' });
+      }, 120);
+    } else {
+      this.onSnapshot(bombSnapshot, { reason: 'bomb' });
+    }
     return true;
   }
 
@@ -1426,7 +1467,7 @@ export class CoreGameplayEngine {
         overdrive: this.overdriveTimer > 0
       });
       vfx.trailPoints = vfx.trailPoints.slice(0, this.reducedMotion ? 4 : (this.mobilePortrait ? portraitTrailCap : 9));
-      const baseTrailInterval = this.overdriveTimer > 0 ? 0.038 : 0.048;
+      const baseTrailInterval = this.mobilePortrait && this.overdriveTimer > 0 ? 0.055 : (this.overdriveTimer > 0 ? 0.038 : 0.048);
       vfx.trailClock = this.reducedMotion ? 0.065 : (this.mobilePortrait ? baseTrailInterval * adaptiveIntervalScale : (this.overdriveTimer > 0 ? 0.020 : 0.030));
     }
 
@@ -1445,7 +1486,7 @@ export class CoreGameplayEngine {
           overdrive: this.overdriveTimer > 0
         });
       }
-      const baseThrusterInterval = this.overdriveTimer > 0 ? 0.036 : 0.052;
+      const baseThrusterInterval = this.mobilePortrait && this.overdriveTimer > 0 ? 0.058 : (this.overdriveTimer > 0 ? 0.036 : 0.052);
       vfx.thrusterClock = this.reducedMotion ? 0.06 : (this.mobilePortrait ? baseThrusterInterval * adaptiveIntervalScale : (this.overdriveTimer > 0 ? 0.018 : 0.032));
     }
 
@@ -2338,6 +2379,37 @@ export class CoreGameplayEngine {
     const palette = ENEMY_VFX[enemy.type] || ENEMY_VFX.fighter;
     const boss = ['miniBoss', 'finalBoss'].includes(enemy.type);
     const heavy = ['heavy', 'elite', 'charger'].includes(enemy.type);
+
+    if (bomb && this.mobilePortrait) {
+      const pushBombFx = (effect) => {
+        if (this.bombVfxEffectBudget <= 0) return false;
+        this.effects.push(effect);
+        this.bombVfxEffectBudget -= 1;
+        return true;
+      };
+      const detailed = boss || this.bombVfxDetailedRemaining > 0;
+      if (!boss && detailed) this.bombVfxDetailedRemaining -= 1;
+      const duration = boss ? 0.58 : heavy ? 0.40 : 0.30;
+
+      // Every bomb kill still gets a readable explosion. Only a few receive the
+      // full layered treatment so a formation wipe cannot create 100+ effects.
+      pushBombFx({ x: enemy.x, y: enemy.y, age: 0, duration, kind: 'explosion', enemyType: enemy.type, color: palette.burst, bomb: true });
+      if (detailed) {
+        pushBombFx({ x: enemy.x, y: enemy.y, age: 0, duration: 0.09, kind: 'coreFlash', enemyType: enemy.type, color: palette.spark, strength: boss ? 1.35 : 1 });
+        pushBombFx({ x: enemy.x, y: enemy.y, age: 0, duration: duration * 0.72, kind: 'deathRing', enemyType: enemy.type, color: palette.burst, strength: boss ? 1.35 : 1 });
+      }
+      const fragments = boss ? 5 : detailed ? 2 : 1;
+      for (let i = 0; i < fragments; i += 1) {
+        const angle = this.random() * Math.PI * 2;
+        const speed = 0.08 + this.random() * (boss ? 0.14 : 0.09);
+        if (!pushBombFx({
+          x: enemy.x, y: enemy.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+          age: 0, duration: 0.26 + this.random() * 0.18, kind: 'debris',
+          color: i % 2 ? palette.spark : palette.burst, size: 0.60 + this.random() * 0.85
+        })) break;
+      }
+      return;
+    }
     const duration = boss ? 0.78 : heavy ? 0.50 : 0.36;
     // VFX Patch 2 layered kill read: core flash -> sprite burst -> shockwave -> debris -> lingering energy haze.
     this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: boss ? 0.15 : 0.10, kind: 'coreFlash', enemyType: enemy.type, color: palette.spark, strength: boss ? 1.75 : heavy ? 1.35 : 1 });
@@ -2502,11 +2574,11 @@ export class CoreGameplayEngine {
     const y = this.player.y * dim.height;
     const radius = dim.min * (0.08 + progress * 0.30);
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.globalAlpha = alpha;
+    this.ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
+    this.ctx.globalAlpha = alpha * (this.mobilePortrait ? 0.78 : 1);
     this.ctx.strokeStyle = '#91f7ff';
     this.ctx.lineWidth = Math.max(2, dim.min * 0.006 * (1 - progress * 0.65));
-    this.ctx.shadowBlur = this.vfxGlow(24);
+    this.ctx.shadowBlur = this.vfxGlow(this.mobilePortrait ? 10 : 24);
     this.ctx.shadowColor = '#5ee6ff';
     this.ctx.beginPath();
     this.ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -2619,18 +2691,27 @@ export class CoreGameplayEngine {
     const entrance = clamp((7 - this.overdriveTimer) / 0.35, 0, 1);
     const intensity = Math.min(1, entrance + (1 - remaining) * 0.12);
     this.ctx.save();
-    // Keep the field at the edges so enemy bullets stay readable.
-    const vignette = this.ctx.createRadialGradient(dim.width * 0.5, dim.height * 0.55, dim.min * 0.18, dim.width * 0.5, dim.height * 0.55, dim.min * 0.78);
-    vignette.addColorStop(0, 'rgba(0,0,0,0)');
-    vignette.addColorStop(0.72, 'rgba(35,184,255,.015)');
-    vignette.addColorStop(1, `rgba(64,220,255,${0.075 * intensity})`);
-    this.ctx.fillStyle = vignette;
-    this.ctx.fillRect(0, 0, dim.width, dim.height);
+    // Keep the field at the edges so enemy bullets stay readable. On portrait
+    // mobile avoid allocating a full-canvas radial gradient every frame.
+    if (this.mobilePortrait) {
+      this.ctx.globalAlpha = 0.035 * intensity;
+      this.ctx.fillStyle = '#48dcff';
+      this.ctx.fillRect(0, 0, dim.width, dim.height);
+      this.ctx.globalAlpha = 1;
+    } else {
+      const vignette = this.ctx.createRadialGradient(dim.width * 0.5, dim.height * 0.55, dim.min * 0.18, dim.width * 0.5, dim.height * 0.55, dim.min * 0.78);
+      vignette.addColorStop(0, 'rgba(0,0,0,0)');
+      vignette.addColorStop(0.72, 'rgba(35,184,255,.015)');
+      vignette.addColorStop(1, `rgba(64,220,255,${0.075 * intensity})`);
+      this.ctx.fillStyle = vignette;
+      this.ctx.fillRect(0, 0, dim.width, dim.height);
+    }
     if (!this.reducedMotion) {
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
       this.ctx.lineCap = 'round';
-      for (let i = 0; i < 12; i += 1) {
-        const lane = (i + 0.5) / 12;
+      const overdriveLaneCount = this.mobilePortrait ? 6 : 12;
+      for (let i = 0; i < overdriveLaneCount; i += 1) {
+        const lane = (i + 0.5) / overdriveLaneCount;
         const phase = (this.elapsed * (0.72 + (i % 3) * 0.11) + i * 0.137) % 1;
         const y = dim.height * (1.08 - phase * 1.18);
         const x = dim.width * lane + Math.sin(i * 2.7) * dim.min * 0.018;
@@ -2638,7 +2719,7 @@ export class CoreGameplayEngine {
         this.ctx.globalAlpha = 0.10 + (i % 3) * 0.025;
         this.ctx.strokeStyle = i % 4 === 0 ? '#fff2aa' : '#73edff';
         this.ctx.lineWidth = Math.max(1, dim.min * 0.0018);
-        this.ctx.shadowBlur = this.vfxGlow(10);
+        this.ctx.shadowBlur = this.vfxGlow(this.mobilePortrait ? 5 : 10);
         this.ctx.shadowColor = '#5ee8ff';
         this.ctx.beginPath();
         this.ctx.moveTo(x, y);
@@ -2716,23 +2797,24 @@ export class CoreGameplayEngine {
     const bx = this.player.x * dim.width;
     const by = this.player.y * dim.height;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
     // A very short white core, then cyan rays; all presentation-only.
     const whiteCore = clamp((life - 0.72) / 0.28, 0, 1);
     if (whiteCore > 0) {
-      this.ctx.globalAlpha = whiteCore * 0.42;
+      this.ctx.globalAlpha = whiteCore * (this.mobilePortrait ? 0.28 : 0.42);
       this.ctx.fillStyle = '#ffffff';
       this.ctx.fillRect(0, 0, dim.width, dim.height);
     }
     this.ctx.strokeStyle = '#c7fbff';
-    this.ctx.shadowBlur = this.vfxGlow(20);
+    this.ctx.shadowBlur = this.vfxGlow(this.mobilePortrait ? 8 : 20);
     this.ctx.shadowColor = '#5de6ff';
     this.ctx.lineCap = 'round';
-    const rayAlpha = Math.sin(progress * Math.PI) * 0.34;
+    const rayAlpha = Math.sin(progress * Math.PI) * (this.mobilePortrait ? 0.26 : 0.34);
     const inner = dim.min * (0.08 + progress * 0.10);
     const outer = dim.min * (0.38 + progress * 0.54);
-    for (let i = 0; i < 12; i += 1) {
-      const angle = i * Math.PI * 2 / 12 + 0.12;
+    const bombRayCount = this.mobilePortrait ? 6 : 12;
+    for (let i = 0; i < bombRayCount; i += 1) {
+      const angle = i * Math.PI * 2 / bombRayCount + 0.12;
       this.ctx.globalAlpha = rayAlpha * (i % 3 === 0 ? 1 : 0.62);
       this.ctx.lineWidth = Math.max(1, dim.min * (i % 3 === 0 ? 0.0032 : 0.0018));
       this.ctx.beginPath();
@@ -2772,7 +2854,7 @@ export class CoreGameplayEngine {
 
     if (this.bombFlashTimer > 0) {
       ctx.save();
-      ctx.globalAlpha = clamp(this.bombFlashTimer / 0.82, 0, 1) * 0.28;
+      ctx.globalAlpha = clamp(this.bombFlashTimer / 0.82, 0, 1) * (this.mobilePortrait ? 0.18 : 0.28);
       ctx.fillStyle = '#dff9ff';
       ctx.fillRect(0, 0, dim.width, dim.height);
       ctx.restore();
@@ -2780,12 +2862,13 @@ export class CoreGameplayEngine {
       const bx = this.player.x * dim.width;
       const by = this.player.y * dim.height;
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = (1 - bombProgress) * 0.82;
+      ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
+      ctx.globalAlpha = (1 - bombProgress) * (this.mobilePortrait ? 0.60 : 0.82);
       ctx.strokeStyle = '#dffcff';
-      ctx.shadowBlur = this.vfxGlow(30);
+      ctx.shadowBlur = this.vfxGlow(this.mobilePortrait ? 10 : 30);
       ctx.shadowColor = '#69e7ff';
-      for (let ring = 0; ring < 3; ring += 1) {
+      const bombRingCount = this.mobilePortrait ? 2 : 3;
+      for (let ring = 0; ring < bombRingCount; ring += 1) {
         ctx.lineWidth = Math.max(2, dim.min * (0.007 - ring * 0.0015));
         ctx.beginPath();
         ctx.arc(bx, by, dim.min * (0.08 + bombProgress * (0.72 + ring * 0.10)), 0, Math.PI * 2);
@@ -3410,7 +3493,7 @@ export class CoreGameplayEngine {
     this.ctx.restore();
   }
 
-  drawProjectileTrail(bullet, dim, { color = '#bdf8ff', length = 0.055, width = 0.010, glow = 12, alpha = 0.85 } = {}) {
+  drawProjectileTrail(bullet, dim, { color = '#bdf8ff', length = 0.055, width = 0.010, glow = 12, alpha = 0.85, composite = 'lighter' } = {}) {
     const screenVx = Number(bullet.vx || 0) * dim.width;
     const screenVy = Number(bullet.vy || 0) * dim.height;
     const magnitude = Math.hypot(screenVx, screenVy);
@@ -3431,7 +3514,7 @@ export class CoreGameplayEngine {
       strokeStyle = gradient;
     }
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = composite;
     this.ctx.globalAlpha = alpha * (this.mobilePortrait ? 0.72 : 1);
     this.ctx.strokeStyle = strokeStyle;
     this.ctx.lineWidth = Math.max(1, dim.min * width);
@@ -3447,13 +3530,15 @@ export class CoreGameplayEngine {
 
   drawPlayerProjectile(bullet, dim) {
     const overdrive = bullet.sprite === 'playerBulletOverdrive';
+    const portraitOverdrive = this.mobilePortrait && overdrive;
     const pulse = 1 + Math.sin(Number(bullet.age || 0) * 34) * (this.reducedMotion ? 0.015 : 0.04);
     this.drawProjectileTrail(bullet, dim, {
       color: overdrive ? '#b6ffff' : '#66dcff',
-      length: overdrive ? 0.082 : 0.060,
-      width: overdrive ? 0.012 : 0.009,
-      glow: overdrive ? 20 : 14,
-      alpha: 0.92
+      length: portraitOverdrive ? 0.052 : (overdrive ? 0.082 : 0.060),
+      width: portraitOverdrive ? 0.008 : (overdrive ? 0.012 : 0.009),
+      glow: portraitOverdrive ? 7 : (overdrive ? 20 : 14),
+      alpha: portraitOverdrive ? 0.72 : 0.92,
+      composite: portraitOverdrive ? 'source-over' : 'lighter'
     });
     const screenVx = Number(bullet.vx || 0) * dim.width;
     const screenVy = Number(bullet.vy || 0) * dim.height;
@@ -3461,8 +3546,8 @@ export class CoreGameplayEngine {
       ? Math.atan2(screenVy, screenVx) + Math.PI / 2
       : 0;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.shadowBlur = this.vfxGlow(overdrive ? 20 : 12);
+    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
+    this.ctx.shadowBlur = this.vfxGlow(portraitOverdrive ? 6 : (overdrive ? 20 : 12));
     this.ctx.shadowColor = '#6ce9ff';
     this.drawSprite(
       this.images[bullet.sprite] || this.images.playerBullet,
@@ -3512,8 +3597,9 @@ export class CoreGameplayEngine {
 
   drawThrusterParticles(dim) {
     if (!this.thrusterParticles?.length) return;
+    const portraitOverdrive = this.mobilePortrait && this.overdriveTimer > 0;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
     for (const particle of this.thrusterParticles) {
       const progress = clamp(particle.age / Math.max(0.001, particle.duration), 0, 1);
       const alpha = (1 - progress) * (particle.overdrive ? 0.78 : 0.58);
@@ -3522,7 +3608,7 @@ export class CoreGameplayEngine {
       const y = particle.y * dim.height;
       this.ctx.globalAlpha = alpha;
       this.ctx.fillStyle = particle.overdrive ? '#dcffff' : '#63ddff';
-      this.ctx.shadowBlur = this.vfxGlow(particle.overdrive ? 16 : 10);
+      this.ctx.shadowBlur = this.vfxGlow(portraitOverdrive && particle.overdrive ? 4 : (particle.overdrive ? 16 : 10));
       this.ctx.shadowColor = '#4fd8ff';
       this.ctx.beginPath();
       this.ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -3535,9 +3621,10 @@ export class CoreGameplayEngine {
     const points = this.playerVfx?.trailPoints || [];
     if (points.length < 2) return;
     const overdrive = this.overdriveTimer > 0;
+    const portraitOverdrive = this.mobilePortrait && overdrive;
     const engineOffsets = [-0.075, 0.075];
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
     this.ctx.lineCap = 'round';
     this.ctx.lineJoin = 'round';
     for (const side of engineOffsets) {
@@ -3551,10 +3638,10 @@ export class CoreGameplayEngine {
         else path.lineTo(x, y);
       });
       const newestLife = clamp(1 - Number(points[0]?.age || 0) / 0.24, 0, 1);
-      this.ctx.globalAlpha = (overdrive ? 0.72 : 0.48) * newestLife;
+      this.ctx.globalAlpha = (portraitOverdrive ? 0.46 : (overdrive ? 0.72 : 0.48)) * newestLife;
       this.ctx.strokeStyle = overdrive ? '#c9ffff' : '#60ddff';
-      this.ctx.lineWidth = Math.max(1.25, dim.min * (overdrive ? 0.0060 : 0.0042));
-      this.ctx.shadowBlur = this.vfxGlow(overdrive ? 22 : 14);
+      this.ctx.lineWidth = Math.max(1.25, dim.min * (portraitOverdrive ? 0.0044 : (overdrive ? 0.0060 : 0.0042)));
+      this.ctx.shadowBlur = this.vfxGlow(portraitOverdrive ? 5 : (overdrive ? 22 : 14));
       this.ctx.shadowColor = '#55dfff';
       this.ctx.stroke(path);
     }
@@ -3570,14 +3657,19 @@ export class CoreGameplayEngine {
     const length = dim.playerSize * (overdrive ? 0.72 : 0.48) * pulse * (1 + moving * 0.16);
     const halfWidth = dim.playerSize * (overdrive ? 0.105 : 0.078);
     const tiltShift = (this.playerVfx?.tilt || 0) * dim.playerSize * 0.55;
-    const gradient = this.ctx.createLinearGradient(x, y, x - tiltShift, y + length);
-    gradient.addColorStop(0, 'rgba(245,255,255,.98)');
-    gradient.addColorStop(0.24, overdrive ? 'rgba(113,246,255,.92)' : 'rgba(74,214,255,.88)');
-    gradient.addColorStop(1, 'rgba(21,102,255,0)');
+    const portraitOverdrive = this.mobilePortrait && overdrive;
+    let thrusterFill = 'rgba(96,225,255,.76)';
+    if (!portraitOverdrive) {
+      const gradient = this.ctx.createLinearGradient(x, y, x - tiltShift, y + length);
+      gradient.addColorStop(0, 'rgba(245,255,255,.98)');
+      gradient.addColorStop(0.24, overdrive ? 'rgba(113,246,255,.92)' : 'rgba(74,214,255,.88)');
+      gradient.addColorStop(1, 'rgba(21,102,255,0)');
+      thrusterFill = gradient;
+    }
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.fillStyle = gradient;
-    this.ctx.shadowBlur = this.vfxGlow(overdrive ? 24 : 16);
+    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
+    this.ctx.fillStyle = thrusterFill;
+    this.ctx.shadowBlur = this.vfxGlow(portraitOverdrive ? 4 : (overdrive ? 24 : 16));
     this.ctx.shadowColor = '#54dcff';
     this.ctx.beginPath();
     this.ctx.moveTo(x - halfWidth, y);
@@ -3592,6 +3684,29 @@ export class CoreGameplayEngine {
     const timer = clamp((this.playerVfx?.muzzleTimer || 0) / 0.10, 0, 1);
     const overdrive = this.overdriveTimer > 0;
     const anchors = overdrive ? [-0.018, 0.018] : [0];
+
+    // Overdrive fires more often and from two muzzles. On portrait mobile use a
+    // small solid flash instead of allocating four gradients for every shot.
+    if (this.mobilePortrait && overdrive) {
+      this.ctx.save();
+      this.ctx.globalCompositeOperation = 'source-over';
+      this.ctx.globalAlpha = timer * 0.78;
+      this.ctx.fillStyle = '#bffbff';
+      this.ctx.strokeStyle = '#86efff';
+      this.ctx.lineCap = 'round';
+      for (const offset of anchors) {
+        const x = (this.player.x + offset) * dim.width;
+        const y = visualY * dim.height - dim.playerSize * 0.37;
+        const radius = dim.playerSize * (0.075 + timer * 0.035);
+        this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.fill();
+        const lance = dim.playerSize * 0.24 * timer;
+        this.ctx.lineWidth = Math.max(1, dim.playerSize * 0.018 * timer);
+        this.ctx.beginPath(); this.ctx.moveTo(x, y); this.ctx.lineTo(x, y - lance); this.ctx.stroke();
+      }
+      this.ctx.restore();
+      return;
+    }
+
     this.ctx.save();
     this.ctx.globalCompositeOperation = 'lighter';
     for (const offset of anchors) {

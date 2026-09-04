@@ -3951,3 +3951,46 @@ html[data-orientation="landscape"] .main-menu-screen .screen-bg.bg-landscape {
     box-shadow: none !important;
   }
 }
+
+
+/* =========================================================
+   PATCH 6 — PORTRAIT SPECIAL ABILITY PERFORMANCE
+   Presentation-only: Bomb / Overdrive gameplay values are unchanged.
+   ========================================================= */
+@media (orientation: portrait) and (pointer: coarse) {
+  /* Canvas already supplies the bomb/overdrive power moment. Avoid a second
+     full-screen DOM compositor stack on mobile Safari. */
+  .gameplay-screen.bomb-live::before,
+  .gameplay-screen.overdrive-burst::before,
+  .bomb-dom-rings,
+  .overdrive-dom-rings {
+    display: none !important;
+  }
+
+  /* Continuous CSS speed-line animation and vignette shadows compete with the
+     canvas during the seven-second Overdrive window. */
+  .gameplay-screen.overdrive-live .speed-lines,
+  .gameplay-screen.overdrive-burst .speed-lines {
+    display: none !important;
+    animation: none !important;
+  }
+  .gameplay-screen.overdrive-live .combat-vignette {
+    box-shadow: none !important;
+  }
+
+  /* Keep the small HUD feedback but remove filter/drop-shadow animation work. */
+  .gameplay-screen .ability-pop {
+    filter: none !important;
+    box-shadow: none !important;
+    animation: patch6AbilityPop .46s ease-out both !important;
+  }
+  .gameplay-screen .hud-energy-pop {
+    filter: none !important;
+    box-shadow: none !important;
+  }
+}
+@keyframes patch6AbilityPop {
+  0% { transform: scale(.92); }
+  45% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
