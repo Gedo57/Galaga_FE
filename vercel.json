@@ -1,16 +1,27 @@
 {
-  "rewrites": [
+  "headers": [
     {
-      "source": "/main-menu",
-      "destination": "/index.html"
+      "source": "/assets/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400, stale-while-revalidate=604800" }
+      ]
     },
     {
-      "source": "/entry",
-      "destination": "/index.html"
+      "source": "/loading-screen-bg.png",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400, stale-while-revalidate=604800" }
+      ]
     },
     {
-      "source": "/gameplay",
-      "destination": "/index.html"
+      "source": "/favicon(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400, stale-while-revalidate=604800" }
+      ]
     }
+  ],
+  "rewrites": [
+    { "source": "/main-menu", "destination": "/index.html" },
+    { "source": "/entry", "destination": "/index.html" },
+    { "source": "/gameplay", "destination": "/index.html" }
   ]
 }

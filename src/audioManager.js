@@ -136,6 +136,19 @@ class AudioManager {
     return this.sfxPools.get(poolKey);
   }
 
+
+  // Patch 4: construct the hot gameplay pools while the loading screen is still
+  // visible. This avoids first-use Audio element allocation during combat.
+  prewarmGameplayPools() {
+    this.getPool('laser', 8);
+    this.getPool('enemyFire', 7);
+    this.getPool('enemyDestroy', 6);
+    this.getPool('explosion', 3);
+    this.getPool('waveStart', 2);
+    this.getPool('waveClear', 2);
+    this.getPool('bombBlast', 3);
+  }
+
   playSfx(key, options = {}) {
     if (this.settings.muted || this.settings.sfxVolume <= 0 || !SFX_TRACKS[key]) return false;
     const now = performance.now();

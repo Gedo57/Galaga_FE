@@ -1,54 +1,13 @@
 import { PatternDirector, PATTERNS } from './patternDirector.js';
+import { createGameplayImageView } from './assetCache.js';
 import { SCORE_VALUES, accuracyBonusRate, comboStepsForDifficulty, comboWindowForDifficulty, waveDefinition } from './waveConfig.js';
+
+const CORE_STATE_SYNC_INTERVAL_SECONDS = 4;
 
 const DANGEROUS_ROUTE_TELEGRAPHS = new Set(['dive', 'charge', 'pincer', 'spiral', 'eliteAssault']);
 const RECOVERY_AFTER_ATTACK = Object.freeze({ pincer: 0.30, charge: 0.34, crossfire: 0.30, eliteAssault: 0.38 });
 
-const ASSETS = {
-  player: '/assets/player/ship.png',
-  playerBullet: '/assets/player/bullet-01.png',
-  playerBulletOverdrive: '/assets/player/bullet-02.png',
-  shield: '/assets/player/shield.png',
-  overdrive: '/assets/player/overdrive.png',
-  bomb: '/assets/player/bomb.png',
-  fighter: '/assets/enemies/Enemy_01_Fighter.png',
-  fighterBullet: '/assets/enemies/Enemy_01_Fighter_Bullet_01.png',
-  diver: '/assets/enemies/Enemy_02_Diver.png',
-  diverBullet: '/assets/enemies/Enemy_02_Diver_Bullet_01.png',
-  diveTrail: '/assets/enemies/Enemy_02_Dive_Trail_01.png',
-  diveWarning: '/assets/enemies/Enemy_02_Dive_Warning_01.png',
-  shooter: '/assets/enemies/Enemy_03_Shooter.png',
-  shooterBullet: '/assets/enemies/Enemy_03_Shooter_Bullet_01.png',
-  shooterCharged: '/assets/enemies/Enemy_03_Shooter_ChargedShot_01.png',
-  heavy: '/assets/enemies/Enemy_04_Heavy.png',
-  heavyBullet: '/assets/enemies/Enemy_04_Heavy_Bullet_01.png',
-  charger: '/assets/enemies/Enemy_05_Charger.png',
-  chargeTrail: '/assets/enemies/Enemy_05_Charge_Trail_01.png',
-  chargeImpact: '/assets/enemies/Enemy_05_Charge_Impact_01.png',
-  elite: '/assets/enemies/Enemy_06_Elite.png',
-  eliteBullet: '/assets/enemies/Enemy_06_Elite_Bullet_01.png',
-  eliteSpecial: '/assets/enemies/Enemy_06_Elite_Special_Bullet_01.png',
-  spawn: '/assets/vfx/Enemy_Spawn_Effect_01.png',
-  hit: '/assets/vfx/Hit_Impact_01.png',
-  explosion: '/assets/vfx/Explosion_Generic_01.png',
-  miniBoss: '/assets/bosses/MiniBoss_01.png',
-  miniBossBullet: '/assets/bosses/MiniBoss_Bullet_01.png',
-  miniBossSpread: '/assets/bosses/MiniBoss_Spread_Bullet_01.png',
-  miniBossPhaseAura: '/assets/bosses/MiniBoss_Phase2_Aura_01.png',
-  miniBossPhaseBurst: '/assets/bosses/MiniBoss_Phase2_Transition_01.png',
-  miniBossTripleBullet: '/assets/bosses/MiniBoss_TripleAim_Bullet_01.png',
-  miniBossTriOrbCharge: '/assets/bosses/MiniBoss_TripleAim_Charge_01.png',
-  miniBossArcBullet: '/assets/bosses/MiniBoss_Arc_Sweep_Bullet_01.png',
-  miniBossAlternatingBullet: '/assets/bosses/MiniBoss_Alternating_Spread_Bullet_01.png',
-  miniBossTargetReticle: '/assets/bosses/MiniBoss_Target_Reticle_01.png',
-  miniBossHeavyCharge: '/assets/bosses/MiniBoss_Heavy_Charge_01.png',
-  miniBossHeavyProjectile: '/assets/bosses/MiniBoss_Heavy_Projectile_01.png',
-  finalBoss: '/assets/bosses/FinalBoss_01.png',
-  finalBossBullet: '/assets/bosses/FinalBoss_Bullet_01.png',
-  finalBossSpread: '/assets/bosses/FinalBoss_Spread_Bullet_01.png',
-  finalBossLaserTelegraph: '/assets/bosses/FinalBoss_Laser_Telegraph_01.png',
-  finalBossLaserBeam: '/assets/bosses/FinalBoss_Laser_Beam_01.png'
-};
+
 
 const ENEMY = Object.freeze({
   // Class identity stays stable across difficulties; HP scaling is applied by
@@ -255,15 +214,8 @@ const intersects = (a, b) => (
   Math.abs(a.y - b.y) * 2 < (a.h + b.h)
 );
 
-function makeImage(src) {
-  const image = new Image();
-  image.decoding = 'async';
-  image.src = src;
-  return image;
-}
-
 function canDraw(image) {
-  return image.complete && image.naturalWidth > 0;
+  return Boolean(image && image.complete && image.naturalWidth > 0);
 }
 
 function isTouchPrimary() {
@@ -314,7 +266,8 @@ export class CoreGameplayEngine {
     this.waveDef = waveDefinition(this.currentWave, this.difficulty);
 
     this.random = makeRandom(`${options.seed || options.sessionId || 'phase-8-preview'}:wave:${this.currentWave}`);
-    this.images = Object.fromEntries(Object.entries(ASSETS).map(([key, src]) => [key, makeImage(src)]));
+    // Patch 4: lazy getters backed by one shared cache; constructor allocates zero sprite Images.
+    this.images = createGameplayImageView();
     this.touchMode = isTouchPrimary();
     this.mobilePortrait = isPortraitMobile();
     this.targetFrameMs = 1000 / 60;
@@ -780,9 +733,9 @@ export class CoreGameplayEngine {
     this.patternBanner.timer = Math.max(0, this.patternBanner.timer - dt);
 
     this.snapshotClock += dt;
-    if (this.snapshotClock >= 1.25) {
+    if (this.snapshotClock >= CORE_STATE_SYNC_INTERVAL_SECONDS) {
       this.snapshotClock = 0;
-      this.onSnapshot(this.snapshot());
+      this.onSnapshot(this.snapshot(), { reason: 'periodic' });
     }
   }
 
@@ -827,7 +780,7 @@ export class CoreGameplayEngine {
     }
     this.patternBanner = { label: 'BOMB', timer: 1.0 };
     this.emitHud();
-    this.onSnapshot(this.snapshot());
+    this.onSnapshot(this.snapshot(), { reason: 'bomb' });
     return true;
   }
 
@@ -2226,7 +2179,7 @@ export class CoreGameplayEngine {
     this.triggerShake(this.currentWave === 10 ? 1.1 : 0.48, this.currentWave === 10 ? 0.42 : 0.22);
     this.emitVfx('wave-clear', { result: summary.waveResult, final: this.currentWave === 10 });
     this.emitHud();
-    this.onSnapshot(summary);
+    this.onSnapshot(summary, { reason: 'wave-clear' });
     this.onWaveClear(summary);
   }
 
@@ -2441,7 +2394,6 @@ export class CoreGameplayEngine {
       this.playerVfx.muzzleTimer = 0;
     }
     this.emitHud();
-    this.onSnapshot(this.snapshot());
 
     if (this.player.lives <= 0) {
       this.player.respawnTimer = 0;

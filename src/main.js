@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { audioManager } from './audioManager.js';
 import { DIFFICULTIES, ENTRY_MIN, ENTRY_STEP, ENTRY_MAX, PLAYER_ID } from './config.js';
 import { CoreGameplayEngine } from './gameEngine.js';
+import { gameplayAssetKeysForWave, preloadGameplayAssetsForWave, retainGameplayAssetsForWave } from './assetCache.js';
 import { checkpointMultiplierForDifficulty, performanceRating, scoreGateForDifficulty, startMultiplierForDifficulty, waveDefinition } from './waveConfig.js';
 import { GameState, StateMachine } from './stateMachine.js';
 
@@ -184,6 +185,7 @@ const model = {
 };
 
 let activeEngine = null;
+let gameplayMountToken = 0;
 let snapshotBusy = false;
 let runLostPending = false;
 let waveClearPending = false;
@@ -195,9 +197,9 @@ let bombDoubleTapTarget = null;
 const BOMB_DOUBLE_TAP_WINDOW_MS = 460;
 
 
-// Startup preloader: load every main-menu visual plus most gameplay/UI assets before
-// the first interactive screen is rendered. Advanced boss variants continue in the
-// background after boot so the menu appears as soon as the essential cache is ready.
+// Patch 4 — production startup cache. The loading screen now fetches only UI/menu
+// resources plus the sprites needed by Wave 1. Boss and late-wave sprites are lazy
+// loaded at safe transition points instead of being decoded before the menu appears.
 const STARTUP_ASSETS = Object.freeze([
   '/assets/mainmenu/background-landscape-clean.png',
   '/assets/mainmenu/background-landscape.png',
@@ -219,65 +221,22 @@ const STARTUP_ASSETS = Object.freeze([
   '/assets/ui/panel-square-blue-b.png',
   '/assets/ui/panel-wide-blue.png',
   '/assets/ui/panel-wide-red.png',
-  '/assets/player/ship.png',
-  '/assets/player/bullet-01.png',
-  '/assets/player/bullet-02.png',
-  '/assets/player/bomb.png',
-  '/assets/player/overdrive.png',
-  '/assets/player/shield.png',
-  '/assets/enemies/Enemy_01_Fighter.png',
-  '/assets/enemies/Enemy_01_Fighter_Bullet_01.png',
-  '/assets/enemies/Enemy_02_Diver.png',
-  '/assets/enemies/Enemy_02_Diver_Bullet_01.png',
-  '/assets/enemies/Enemy_02_Dive_Trail_01.png',
-  '/assets/enemies/Enemy_02_Dive_Warning_01.png',
-  '/assets/enemies/Enemy_03_Shooter.png',
-  '/assets/enemies/Enemy_03_Shooter_Bullet_01.png',
-  '/assets/enemies/Enemy_03_Shooter_ChargedShot_01.png',
-  '/assets/enemies/Enemy_04_Heavy.png',
-  '/assets/enemies/Enemy_04_Heavy_Bullet_01.png',
-  '/assets/enemies/Enemy_05_Charger.png',
-  '/assets/enemies/Enemy_05_Charge_Trail_01.png',
-  '/assets/enemies/Enemy_05_Charge_Impact_01.png',
-  '/assets/enemies/Enemy_06_Elite.png',
-  '/assets/enemies/Enemy_06_Elite_Bullet_01.png',
-  '/assets/enemies/Enemy_06_Elite_Special_Bullet_01.png',
-  '/assets/bosses/MiniBoss_01.png',
-  '/assets/bosses/MiniBoss_Bullet_01.png',
-  '/assets/bosses/MiniBoss_Spread_Bullet_01.png',
-  '/assets/bosses/MiniBoss_Phase2_Aura_01.png',
-  '/assets/bosses/FinalBoss_01.png',
-  '/assets/bosses/FinalBoss_Bullet_01.png',
-  '/assets/bosses/FinalBoss_Spread_Bullet_01.png',
-  '/assets/bosses/FinalBoss_Laser_Telegraph_01.png',
-  '/assets/bosses/FinalBoss_Laser_Beam_01.png',
-  '/assets/vfx/Enemy_Spawn_Effect_01.png',
-  '/assets/vfx/Explosion_Generic_01.png',
-  '/assets/vfx/Hit_Impact_01.png',
   '/assets/audio/music-main-menu.mp3',
   '/assets/audio/music-gameplay.mp3',
   '/assets/audio/sfx-laser.mp3',
-  '/assets/audio/sfx-explosion.mp3',
-  '/assets/audio/sfx-wave-start.mp3',
-  '/assets/audio/sfx-wave-clear.mp3'
-]);
-
-const DEFERRED_ASSETS = Object.freeze([
-  '/assets/bosses/MiniBoss_Alternating_Spread_Bullet_01.png',
-  '/assets/bosses/MiniBoss_Arc_Sweep_Bullet_01.png',
-  '/assets/bosses/MiniBoss_Heavy_Charge_01.png',
-  '/assets/bosses/MiniBoss_Heavy_Projectile_01.png',
-  '/assets/bosses/MiniBoss_Phase2_Transition_01.png',
-  '/assets/bosses/MiniBoss_Target_Reticle_01.png',
-  '/assets/bosses/MiniBoss_TripleAim_Bullet_01.png',
-  '/assets/bosses/MiniBoss_TripleAim_Charge_01.png',
-  '/assets/audio/sfx-coin-spend.mp3',
-  '/assets/audio/sfx-charge-up.mp3',
   '/assets/audio/sfx-enemy-fire.mp3',
   '/assets/audio/sfx-enemy-destroy.mp3',
-  '/assets/audio/sfx-dive-flyby.mp3',
-  '/assets/audio/sfx-bomb-blast.mp3'
+  '/assets/audio/sfx-explosion.mp3',
+  '/assets/audio/sfx-wave-start.mp3',
+  '/assets/audio/sfx-wave-clear.mp3',
+  '/assets/audio/sfx-bomb-blast.mp3',
+  '/assets/audio/sfx-coin-spend.mp3',
+  '/assets/audio/sfx-charge-up.mp3',
+  '/assets/audio/sfx-dive-flyby.mp3'
 ]);
+
+const STARTUP_GAMEPLAY_KEYS = Object.freeze(gameplayAssetKeysForWave(1, 'medium'));
+const STARTUP_TOTAL_ASSETS = STARTUP_ASSETS.length + STARTUP_GAMEPLAY_KEYS.length;
 
 const PRELOAD_CONCURRENCY = 6;
 const PRELOAD_TIMEOUT_MS = 20000;
@@ -288,14 +247,14 @@ function loadingScreenMarkup() {
       <div class="startup-loader-copy" data-loading-status>Loading....</div>
       <div class="startup-loader-track" aria-hidden="true"><span data-loading-bar></span></div>
       <div class="startup-loader-percent" data-loading-percent>0%</div>
-      <div class="startup-loader-count" data-loading-count>0 / ${STARTUP_ASSETS.length}</div>
+      <div class="startup-loader-count" data-loading-count>0 / ${STARTUP_TOTAL_ASSETS}</div>
     </div>
   </main>`;
 }
 
 function showLoadingScreen() {
   if (!app.querySelector('[data-startup-loader]')) app.innerHTML = loadingScreenMarkup();
-  updateLoadingProgress(0, 0, STARTUP_ASSETS.length, 'Loading....');
+  updateLoadingProgress(0, 0, STARTUP_TOTAL_ASSETS, 'Loading....');
 }
 
 function updateLoadingProgress(percent, completed, total, status = 'Loading....') {
@@ -379,13 +338,25 @@ async function preloadAssets(urls, { onProgress } = {}) {
   };
 }
 
-function preloadDeferredAssets() {
-  window.setTimeout(() => {
-    preloadAssets(DEFERRED_ASSETS).then((summary) => {
-      if (summary.failed.length) console.warn('Deferred asset preload skipped:', summary.failed);
-    }).catch(() => {});
-  }, 0);
+
+async function prepareGameplayWaveAssets(wave, { trim = true, onProgress } = {}) {
+  const targetWave = Math.max(1, Math.min(10, Number(wave) || 1));
+  const difficulty = model.session?.difficulty || model.selectedDifficulty || 'medium';
+  if (trim) retainGameplayAssetsForWave(targetWave, difficulty);
+  const summary = await preloadGameplayAssetsForWave(targetWave, difficulty, { onProgress });
+  if (summary.failed.length) console.warn(`Wave ${targetWave} assets unavailable:`, summary.failed);
+  return summary;
 }
+
+function warmNextWaveAssets() {
+  const nextWave = Number(model.wave || 1) + 1;
+  if (nextWave > 10) return Promise.resolve({ total: 0, loaded: 0, failed: [] });
+  return prepareGameplayWaveAssets(nextWave, { trim: true }).catch((error) => {
+    console.warn(`Wave ${nextWave} asset warmup failed:`, error?.message || error);
+    return { total: 0, loaded: 0, failed: [] };
+  });
+}
+
 
 // Phase 7 presentation-only telemetry. This never changes gameplay authority or payout logic.
 const visualTelemetry = {
@@ -865,7 +836,7 @@ function systemFallbackScreen(state) {
     </div>
   </section>`;
 }
-function stopGameplayEngine() { if (activeEngine) { activeEngine.stop(); activeEngine = null; } }
+function stopGameplayEngine() { gameplayMountToken += 1; if (activeEngine) { activeEngine.stop(); activeEngine = null; } }
 function stopCheckpointClock() { if (checkpointClock) { clearInterval(checkpointClock); checkpointClock = null; } }
 function render() {
   stopGameplayEngine(); stopCheckpointClock();
@@ -884,6 +855,7 @@ function render() {
   audioManager.setMusicTrack(musicTrackForState(state));
   queueMicrotask(() => app.querySelector('.screen')?.classList.add('screen-ready'));
   if (state === GameState.WAVE_PLAYING) queueMicrotask(mountGameplayEngine);
+  if (state === GameState.WAVE_CLEAR) queueMicrotask(() => { warmNextWaveAssets(); });
   if (state === GameState.CHECKPOINT) queueMicrotask(startCheckpointClock);
 }
 function startCheckpointClock() {
@@ -934,18 +906,28 @@ function updateGameplayHud(snapshot) {
   const bombButton = app.querySelector('[data-action="bomb"]');
   if (bombButton) { const ready = Boolean(snapshot.bombAvailable); bombButton.disabled = !ready; bombButton.classList.toggle('spent', !ready); const label = bombButton.querySelector('span'); if (label) label.textContent = ready ? 'BOMB • 1' : 'BOMB • USED'; }
 }
-async function persistCoreSnapshot(snapshot) {
+async function persistCoreSnapshot(snapshot, meta = {}) {
   updateGameplayHud(snapshot);
+  const reason = String(meta?.reason || 'periodic');
   if (snapshot.waveResult || snapshotBusy || waveClearPending || !model.session?.id || String(model.session.id).startsWith('dev-')) return;
+  if (machine.state !== GameState.WAVE_PLAYING) return;
+
   snapshotBusy = true;
+  const sessionId = model.session.id;
   try {
-    const payload = await api.saveCoreState(model.session.id, snapshot);
-    model.session = payload.session;
+    // Patch 5: periodic state sync is intentionally sparse. Important terminal
+    // transitions use their dedicated endpoints; bomb is the only in-wave
+    // action that requests an immediate core-state flush.
+    const payload = await api.saveCoreState(sessionId, snapshot, { reason });
+    if (model.session?.id === sessionId && machine.state === GameState.WAVE_PLAYING) model.session = payload.session;
   } catch (error) {
+    // A late periodic/bomb response can race a legitimate wave transition.
+    // 409 in that case is stale network work, not a gameplay failure.
+    if (error?.status === 409 && (waveClearPending || machine.state !== GameState.WAVE_PLAYING)) return;
     console.warn('Core-state sync failed:', error.message);
-    if (error?.status === 422 && model.session?.id) {
+    if (error?.status === 422 && model.session?.id === sessionId && machine.state === GameState.WAVE_PLAYING) {
       try {
-        const authoritative = await api.getSession(model.session.id);
+        const authoritative = await api.getSession(sessionId);
         applySessionToModel(authoritative.session);
         model.error = 'Gameplay state was rejected by server validation and has been resynced.';
         machine.set(GameState.WAVE_PLAYING, { force: true });
@@ -985,9 +967,19 @@ async function handleWaveClear(snapshot) {
   } catch (error) { model.error = error.message; machine.set(GameState.WAVE_PLAYING, { force: true }); }
   finally { waveClearPending = false; }
 }
-function mountGameplayEngine() {
+async function mountGameplayEngine() {
   if (machine.state !== GameState.WAVE_PLAYING || activeEngine) return;
-  const canvas = app.querySelector('[data-game-canvas]'); if (!canvas) return;
+  const canvas = app.querySelector('[data-game-canvas]');
+  if (!canvas) return;
+  const mountToken = ++gameplayMountToken;
+  const requestedWave = Math.max(1, Math.min(10, Number(model.wave) || 1));
+
+  // Current-wave assets are guaranteed ready before the real-time loop starts.
+  // On the initial run this is a cache hit from the startup loader; later waves
+  // are warmed on clear/checkpoint transitions.
+  await prepareGameplayWaveAssets(requestedWave, { trim: true });
+  if (mountToken !== gameplayMountToken || machine.state !== GameState.WAVE_PLAYING || activeEngine || app.querySelector('[data-game-canvas]') !== canvas) return;
+
   const core = model.session?.coreState || {};
   activeEngine = new CoreGameplayEngine(canvas, {
     difficulty: model.session?.difficulty || model.selectedDifficulty,
@@ -1022,7 +1014,7 @@ async function resumeActiveSession(session) {
   if (!session) return false; applySessionToModel(session);
   if (session.state === 'RESULT') { machine.set(GameState.RESULT, { force: true }); return true; }
   if (session.state === 'BOSS_COMPLETE') { machine.set(GameState.BOSS_COMPLETE, { force: true }); return true; }
-  if (session.state === 'WAVE_PLAYING') { machine.set(GameState.WAVE_PLAYING, { force: true }); return true; }
+  if (session.state === 'WAVE_PLAYING') { await prepareGameplayWaveAssets(model.wave, { trim: true }); machine.set(GameState.WAVE_PLAYING, { force: true }); return true; }
   if (session.state === 'WAVE_CLEAR') { machine.set(GameState.WAVE_CLEAR, { force: true }); scheduleAutoAdvance(); return true; }
   if (session.state === 'CHECKPOINT') { machine.set(GameState.CHECKPOINT, { force: true }); return true; }
   if (['ENTRY_PAID', 'COUNTDOWN'].includes(session.state)) {
@@ -1060,12 +1052,15 @@ async function advanceWave() {
 async function continueCheckpoint() {
   if (checkpointDecisionPending) return;
   checkpointDecisionPending = true; stopCheckpointClock(); model.error = ''; render();
+  const nextWave = Math.min(10, Number(model.wave || 1) + 1);
+  const nextAssetsReady = prepareGameplayWaveAssets(nextWave, { trim: true });
   try {
     if (!model.session?.id || String(model.session.id).startsWith('dev-')) {
       if (model.wave >= 10) throw new Error('Run is already at the Final Boss');
+      await nextAssetsReady;
       model.wave += 1; model.checkpoint = null; model.lastWaveResult = null; checkpointDecisionPending = false; machine.set(GameState.WAVE_PLAYING, { force: true }); return;
     }
-    const payload = await api.checkpointDecision(model.session.id, 'continue');
+    const [payload] = await Promise.all([api.checkpointDecision(model.session.id, 'continue'), nextAssetsReady]);
     if (payload.player) model.player = payload.player;
     applySessionToModel(payload.session);
     checkpointDecisionPending = false;
@@ -1094,7 +1089,13 @@ async function cashOut(mode = 'manual') {
 }
 function scheduleAutoAdvance() {
   const token = ++autoAdvanceToken;
-  setTimeout(async () => { if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return; await advanceWave(); }, 1450);
+  const nextAssetsReady = warmNextWaveAssets();
+  setTimeout(async () => {
+    if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return;
+    await nextAssetsReady;
+    if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return;
+    await advanceWave();
+  }, 1450);
 }
 async function abandonRun() {
   ++autoAdvanceToken; stopGameplayEngine(); stopCheckpointClock();
@@ -1112,6 +1113,8 @@ async function backToMenu() {
   } catch (error) { console.warn('Session close failed:', error.message); }
   model.session = null; model.checkpoint = null; model.lastWaveResult = null; model.error = ''; checkpointDecisionPending = false;
   machine.set(GameState.MENU, { force: true });
+  retainGameplayAssetsForWave(1, model.selectedDifficulty);
+  preloadGameplayAssetsForWave(1, model.selectedDifficulty).catch(() => {});
 }
 function makeDevCheckpoint(wave) {
   const difficulty = model.selectedDifficulty;
@@ -1285,24 +1288,30 @@ window.addEventListener('popstate', () => {
     .then((activeSession) => ({ ok: true, activeSession }))
     .catch((error) => ({ ok: false, error }));
 
-  const preloadSummary = await preloadAssets(STARTUP_ASSETS, {
-    onProgress: ({ completed, total }) => {
-      const percent = total ? (completed / total) * 100 : 100;
-      const status = completed >= total ? 'Loading....' : 'Loading....';
-      updateLoadingProgress(percent, completed, total, status);
-    }
-  });
+  let staticCompleted = 0;
+  let gameplayCompleted = 0;
+  const reportStartupProgress = () => {
+    const completed = staticCompleted + gameplayCompleted;
+    const percent = STARTUP_TOTAL_ASSETS ? (completed / STARTUP_TOTAL_ASSETS) * 100 : 100;
+    updateLoadingProgress(percent, completed, STARTUP_TOTAL_ASSETS, 'Loading....');
+  };
 
-  if (preloadSummary.failed.length) {
-    console.warn('Startup assets unavailable:', preloadSummary.failed);
-  }
+  const [preloadSummary, gameplayPreloadSummary] = await Promise.all([
+    preloadAssets(STARTUP_ASSETS, {
+      onProgress: ({ completed }) => { staticCompleted = completed; reportStartupProgress(); }
+    }),
+    preloadGameplayAssetsForWave(1, 'medium', {
+      onProgress: ({ completed }) => { gameplayCompleted = completed; reportStartupProgress(); }
+    })
+  ]);
 
-  updateLoadingProgress(100, preloadSummary.total, preloadSummary.total, 'Loading....');
+  const startupFailures = [...preloadSummary.failed, ...gameplayPreloadSummary.failed];
+  if (startupFailures.length) console.warn('Startup assets unavailable:', startupFailures);
+
+  // Pools are created only after their media files have been warmed into browser cache.
+  audioManager.prewarmGameplayPools();
+  updateLoadingProgress(100, STARTUP_TOTAL_ASSETS, STARTUP_TOTAL_ASSETS, 'Loading....');
   const playerResult = await playerRequest;
-
-  // Advanced boss/audio files are intentionally non-blocking and continue warming
-  // the browser cache once the first screen is visible.
-  preloadDeferredAssets();
 
   if (playerResult.ok) {
     const activeSession = playerResult.activeSession;
