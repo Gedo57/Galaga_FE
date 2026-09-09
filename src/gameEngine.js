@@ -267,7 +267,8 @@ function makeRandom(seedValue) {
 export class CoreGameplayEngine {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: true });
+    const safariMobileHint = isSafariMobile();
+    this.ctx = canvas.getContext('2d', { alpha: true, desynchronized: safariMobileHint });
     this.difficulty = options.difficulty || 'medium';
     this.tuning = TUNING[this.difficulty] || TUNING.medium;
     this.onHud = options.onHud || (() => {});
@@ -285,7 +286,7 @@ export class CoreGameplayEngine {
     this.images = createGameplayImageView();
     this.touchMode = isTouchPrimary();
     this.mobilePortrait = isPortraitMobile();
-    this.safariMobile = isSafariMobile();
+    this.safariMobile = safariMobileHint;
     this.safariPortrait = this.safariMobile && this.mobilePortrait;
     this.targetFrameMs = 1000 / 60;
     this.frameAccumulatorMs = 0;
@@ -313,6 +314,8 @@ export class CoreGameplayEngine {
     this.safariStable30 = false;
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
+    this.hudDirty = false;
+    this.hudFlushClock = 0;
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -586,6 +589,8 @@ export class CoreGameplayEngine {
     this.safariStable30 = false;
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
+    this.hudDirty = false;
+    this.hudFlushClock = 0;
     window.addEventListener('resize', this.boundResize, { passive: true });
     window.visualViewport?.addEventListener('resize', this.boundViewportResize, { passive: true });
     window.addEventListener('keydown', this.boundKeyDown, { passive: false });
@@ -634,7 +639,7 @@ export class CoreGameplayEngine {
     document.documentElement.classList.toggle('safari-portrait-render', this.safariPortrait);
     // Safari portrait renders materially fewer backing-store pixels. CSS size
     // is unchanged, so layout/input coordinates and gameplay remain identical.
-    const dprCap = this.safariPortrait ? 1.25 : (this.mobilePortrait ? 1.5 : 2);
+    const dprCap = this.safariPortrait ? 1.0 : (this.mobilePortrait ? 1.5 : 2);
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
@@ -658,6 +663,8 @@ export class CoreGameplayEngine {
       this.safariStable30 = false;
       this.safariSlowLockMs = 0;
       this.lastDrawTime = 0;
+    this.hudDirty = false;
+    this.hudFlushClock = 0;
     }
   }
 
@@ -821,6 +828,10 @@ export class CoreGameplayEngine {
     this.updateBossSpecials(dt);
     this.updateCollisions();
     this.updateEffects(dt);
+    if (this.safariPortrait && this.hudDirty) {
+      this.hudFlushClock += dt;
+      if (this.hudFlushClock >= 0.12) this.flushHud();
+    }
     this.updateEnemyFire(dt);
     this.updateFormationLifecycle(dt);
     this.patternBanner.timer = Math.max(0, this.patternBanner.timer - dt);
@@ -2395,7 +2406,7 @@ export class CoreGameplayEngine {
     const incomingVy = Number(impact?.vy || -1);
     const incomingMag = Math.hypot(incomingVx, incomingVy) || 1;
     const reverseAngle = Math.atan2(-incomingVy / incomingMag, -incomingVx / incomingMag);
-    const sparkCount = this.reducedMotion ? 4 : 7;
+    const sparkCount = this.safariPortrait ? 2 : (this.reducedMotion ? 4 : 7);
     for (let i = 0; i < sparkCount; i += 1) {
       const fan = (this.random() - 0.5) * 1.10;
       const angle = reverseAngle + fan;
@@ -2409,8 +2420,10 @@ export class CoreGameplayEngine {
       });
     }
     if (enemy.hp <= 0) this.killEnemy(enemy);
-    else this.emitAudio('enemy-hit', { enemyType: enemy.type, hp: enemy.hp, maxHp: enemy.maxHp });
-    this.emitHud();
+    else {
+      this.emitAudio('enemy-hit', { enemyType: enemy.type, hp: enemy.hp, maxHp: enemy.maxHp });
+      this.emitHud();
+    }
   }
 
   killEnemy(enemy) {
@@ -2484,6 +2497,18 @@ export class CoreGameplayEngine {
           age: 0, duration: 0.26 + this.random() * 0.18, kind: 'debris',
           color: i % 2 ? palette.spark : palette.burst, size: 0.60 + this.random() * 0.85
         })) break;
+      }
+      return;
+    }
+    if (this.safariPortrait) {
+      const duration = boss ? 0.58 : heavy ? 0.40 : 0.30;
+      this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration, kind: 'explosion', enemyType: enemy.type, color: palette.burst, bomb });
+      if (boss || heavy) this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: duration * 0.72, kind: 'deathRing', enemyType: enemy.type, color: palette.burst, strength: boss ? 1.3 : 1 });
+      const fragments = boss ? 3 : heavy ? 2 : 1;
+      for (let i = 0; i < fragments; i += 1) {
+        const angle = this.random() * Math.PI * 2;
+        const speed = 0.08 + this.random() * 0.10;
+        this.effects.push({ x: enemy.x, y: enemy.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, age: 0, duration: 0.28, kind: 'debris', color: i % 2 ? palette.spark : palette.burst, size: 0.7 });
       }
       return;
     }
@@ -2567,6 +2592,7 @@ export class CoreGameplayEngine {
       if (effect.kind === 'debris') effect.vy += 0.10 * dt;
     }
     this.effects = this.effects.filter((effect) => effect.age < effect.duration);
+    if (this.safariPortrait && this.effects.length > 36) this.effects = this.effects.slice(-36);
   }
 
   snapshot() {
@@ -2611,12 +2637,22 @@ export class CoreGameplayEngine {
     };
   }
 
-  emitHud() {
+  emitHud(force = false) {
+    if (this.safariPortrait && this.running && !force) {
+      this.hudDirty = true;
+      return;
+    }
+    this.flushHud();
+  }
+
+  flushHud() {
+    this.hudDirty = false;
+    this.hudFlushClock = 0;
     this.onHud(this.snapshot());
   }
 
   drawAmbientSpace(dim) {
-    if (!this.ambientParticles?.length) return;
+    if (this.safariPortrait || !this.ambientParticles?.length) return;
     const { ctx } = this;
     ctx.save();
     ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait && this.adaptiveVfxLevel >= 2 ? 'source-over' : 'lighter');
@@ -2677,6 +2713,13 @@ export class CoreGameplayEngine {
     const x = boss.x * dim.width;
     const y = boss.y * dim.height;
     this.ctx.save();
+    if (this.safariPortrait) {
+      this.ctx.globalAlpha = life * (boss.type === 'finalBoss' ? 0.18 : 0.12);
+      this.ctx.fillStyle = boss.type === 'finalBoss' ? '#4a1008' : '#382006';
+      this.ctx.fillRect(0, 0, dim.width, dim.height);
+      this.ctx.restore();
+      return;
+    }
     // A brief cinematic dim makes the phase change read without hiding bullets.
     this.ctx.globalAlpha = life * (boss.type === 'finalBoss' ? 0.24 : 0.17);
     this.ctx.fillStyle = '#02040c';
@@ -2731,7 +2774,7 @@ export class CoreGameplayEngine {
   }
 
   drawWaveStartSweep(dim) {
-    if (this.waveStartFxTimer <= 0) return;
+    if (this.safariPortrait || this.waveStartFxTimer <= 0) return;
     const progress = 1 - clamp(this.waveStartFxTimer / 1.25, 0, 1);
     const fade = Math.sin(clamp(progress, 0, 1) * Math.PI);
     const y = dim.height * (0.14 + progress * 0.72);
@@ -2763,6 +2806,7 @@ export class CoreGameplayEngine {
   }
 
   drawOverdriveField(dim) {
+    if (this.safariPortrait) return;
     if (this.overdriveTimer <= 0 || this.player.lives <= 0) return;
     const remaining = clamp(this.overdriveTimer / 7, 0, 1);
     const entrance = clamp((7 - this.overdriveTimer) / 0.35, 0, 1);
@@ -3082,7 +3126,7 @@ export class CoreGameplayEngine {
     }
 
     // Motion after-images make dives/charges readable without adding new art assets.
-    const allowMotionAfterImages = !this.mobilePortrait || this.adaptiveVfxLevel < 2 || enemy.type === 'charger';
+    const allowMotionAfterImages = !this.safariPortrait && (!this.mobilePortrait || this.adaptiveVfxLevel < 2 || enemy.type === 'charger');
     if (attacking && enemy.trailPoints?.length && allowMotionAfterImages) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
@@ -3096,14 +3140,14 @@ export class CoreGameplayEngine {
       this.ctx.restore();
     }
 
-    if (enemy.type === 'diver' && attacking && canDraw(this.images.diveTrail)) {
+    if (!this.safariPortrait && enemy.type === 'diver' && attacking && canDraw(this.images.diveTrail)) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = 0.36 + Math.sin(this.elapsed * 20) * 0.08;
       this.drawSprite(this.images.diveTrail, state.x, state.y - 0.045, dim.enemySize * 1.42, state.rotation);
       this.ctx.restore();
     }
-    if (enemy.type === 'charger' && attacking && canDraw(this.images.chargeTrail)) {
+    if (!this.safariPortrait && enemy.type === 'charger' && attacking && canDraw(this.images.chargeTrail)) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = 0.50 + Math.sin(this.elapsed * 24) * 0.10;
@@ -3180,6 +3224,7 @@ export class CoreGameplayEngine {
   }
 
   drawEnemySpawnStreak(enemy, state, dim, palette) {
+    if (this.safariPortrait) return;
     const t = state.spawnT;
     const x = state.x * dim.width;
     const y = state.y * dim.height;
@@ -3237,6 +3282,7 @@ export class CoreGameplayEngine {
   }
 
   drawAttackRouteTelegraph(enemy, state, dim, palette, remaining) {
+    if (this.safariPortrait) return;
     const attack = enemy.attack || {};
     if (!DANGEROUS_ROUTE_TELEGRAPHS.has(String(attack.kind || ''))) return;
     const samples = attack.kind === 'spiral' ? 20 : 14;
@@ -3314,11 +3360,16 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = 0.68 + progress * 0.30;
     this.ctx.shadowBlur = this.vfxGlow(22);
     this.ctx.shadowColor = enemy.type === 'elite' ? '#ff67e2' : '#ffab62';
-    const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
-    gradient.addColorStop(0, '#ffffff');
-    gradient.addColorStop(0.28, enemy.type === 'elite' ? '#ff92ec' : '#ffd092');
-    gradient.addColorStop(1, 'rgba(255,100,45,0)');
-    this.ctx.fillStyle = gradient;
+    if (this.safariPortrait) {
+      this.ctx.fillStyle = enemy.type === 'elite' ? '#ff92ec' : '#ffd092';
+      this.ctx.globalAlpha = 0.52 + progress * 0.26;
+    } else {
+      const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
+      gradient.addColorStop(0, '#ffffff');
+      gradient.addColorStop(0.28, enemy.type === 'elite' ? '#ff92ec' : '#ffd092');
+      gradient.addColorStop(1, 'rgba(255,100,45,0)');
+      this.ctx.fillStyle = gradient;
+    }
     this.ctx.beginPath();
     this.ctx.arc(x, y, radius, 0, Math.PI * 2);
     this.ctx.fill();
@@ -3341,6 +3392,8 @@ export class CoreGameplayEngine {
     const palette = ENEMY_VFX[effect.enemyType] || ENEMY_VFX.fighter;
     const x = Number(effect.x || 0) * dim.width;
     const y = Number(effect.y || 0) * dim.height;
+
+    if (this.safariPortrait && ['energyCloud', 'secondaryBurst', 'coreFlash'].includes(effect.kind)) return;
 
     if (effect.kind === 'spriteEffect') {
       const image = this.images[effect.spriteKey];
@@ -3612,7 +3665,7 @@ export class CoreGameplayEngine {
     const overdrive = bullet.sprite === 'playerBulletOverdrive';
     const portraitOverdrive = this.mobilePortrait && overdrive;
     const pulse = 1 + Math.sin(Number(bullet.age || 0) * 34) * (this.reducedMotion ? 0.015 : 0.04);
-    this.drawProjectileTrail(bullet, dim, {
+    if (!this.safariPortrait) this.drawProjectileTrail(bullet, dim, {
       color: overdrive ? '#b6ffff' : '#66dcff',
       length: portraitOverdrive ? 0.052 : (overdrive ? 0.082 : 0.060),
       width: portraitOverdrive ? 0.008 : (overdrive ? 0.012 : 0.009),
@@ -3645,7 +3698,7 @@ export class CoreGameplayEngine {
     const spec = PROJECTILE_VFX[sprite] || {};
     const color = bullet.trailColor || spec.color || (dangerous ? '#ffb36a' : '#ff704f');
     const pulse = 1 + Math.sin(Number(bullet.age || 0) * 28) * (this.reducedMotion ? 0.01 : (dangerous ? 0.05 : 0.025));
-    if (!this.mobilePortrait || dangerous) {
+    if (!this.safariPortrait && (!this.mobilePortrait || dangerous)) {
       this.drawProjectileTrail(bullet, dim, {
         color,
         length: Number(spec.length || (dangerous ? 0.080 : 0.052)),
@@ -3676,7 +3729,7 @@ export class CoreGameplayEngine {
   }
 
   drawThrusterParticles(dim) {
-    if (!this.thrusterParticles?.length) return;
+    if (this.safariPortrait || !this.thrusterParticles?.length) return;
     const portraitOverdrive = this.mobilePortrait && this.overdriveTimer > 0;
     this.ctx.save();
     this.ctx.globalCompositeOperation = this.vfxComposite(portraitOverdrive ? 'source-over' : 'lighter');
@@ -3698,6 +3751,7 @@ export class CoreGameplayEngine {
   }
 
   drawPlayerMotionTrail(dim, visualY) {
+    if (this.safariPortrait) return;
     const points = this.playerVfx?.trailPoints || [];
     if (points.length < 2) return;
     const overdrive = this.overdriveTimer > 0;
