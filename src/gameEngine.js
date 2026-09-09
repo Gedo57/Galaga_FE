@@ -321,6 +321,10 @@ export class CoreGameplayEngine {
     this.safariFrameBufferMs = 0;
     this.hudDirty = false;
     this.hudFlushClock = 0;
+    // Patch 7 — sustained Safari combat profile. The cache stores a small
+    // pre-rotated copy of formation sprites so WebKit does not execute a
+    // translate/rotate/restore stack for every stationary enemy every frame.
+    this.safariHalfTurnSpriteCache = new WeakMap();
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -878,14 +882,14 @@ export class CoreGameplayEngine {
       this.flushPointerInput();
       const frameMs = Math.min(34, Math.max(1, this.safariFrameBufferMs));
       this.safariFrameBufferMs = 0;
-      // Split only genuinely late frames so collision/AI integration remains
-      // stable without doing the old update-update-draw catch-up on normal frames.
-      const substeps = frameMs > 22 ? 2 : 1;
-      const dt = (frameMs / 1000) / substeps;
-      for (let step = 0; step < substeps; step += 1) {
-        this.elapsed += dt;
-        this.update(dt);
-      }
+      // Patch 7 — do one real-time simulation pass per presented Safari frame.
+      // The previous >22 ms split doubled all array scans/collision/pattern work
+      // exactly when WebKit was already late. A 22–34 ms dt is already supported
+      // by the desktop path, so keeping one pass preserves real elapsed gameplay
+      // time without creating a self-reinforcing low-FPS workload.
+      const dt = frameMs / 1000;
+      this.elapsed += dt;
+      this.update(dt);
       this.draw();
       this.lastDrawTime = time;
       this.observeRenderPerformance(time);
@@ -953,7 +957,9 @@ export class CoreGameplayEngine {
     this.updateEffects(dt);
     if (this.safariPortrait && this.hudDirty) {
       this.hudFlushClock += dt;
-      if (this.hudFlushClock >= 0.16) this.flushHud();
+      // Four HUD commits per second are visually continuous for score/energy,
+      // while avoiding repeated selector/style work in WebKit's hot path.
+      if (this.hudFlushClock >= 0.25) this.flushHud();
     }
     this.updateEnemyFire(dt);
     this.updateFormationLifecycle(dt);
@@ -3265,7 +3271,7 @@ export class CoreGameplayEngine {
     const idlePulse = this.reducedMotion ? 1 : 1 + Math.sin(this.elapsed * (enemy.type === 'heavy' ? 3.2 : 4.4) + Number(enemy.idleSeed || 0)) * (boss ? 0.018 : 0.026);
     const settle = spawnT < 1 ? 0.76 + spawnEase * 0.24 + Math.sin(spawnT * Math.PI) * 0.08 : 1;
     const alpha = spawnT < 0.05 ? 0 : clamp(spawnT * 1.8, 0, 1);
-    const idleRoll = enemy.mode === 'formation' && !this.reducedMotion
+    const idleRoll = enemy.mode === 'formation' && !this.reducedMotion && !this.safariPortrait
       ? Math.sin(this.elapsed * 1.7 + Number(enemy.idleSeed || 0)) * (enemy.type === 'heavy' ? 0.018 : 0.035)
       : 0;
     return { x, y, size: dim.enemySize * spec.size * idlePulse * settle, alpha, rotation: Number(enemy.rotation ?? Math.PI) + idleRoll, spawnT };
@@ -3782,11 +3788,17 @@ export class CoreGameplayEngine {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.90;
-      const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
-      gradient.addColorStop(0, '#ffffff');
-      gradient.addColorStop(0.26, effect.charged ? '#ffd08f' : palette.spark);
-      gradient.addColorStop(1, 'rgba(255,90,40,0)');
-      this.ctx.fillStyle = gradient;
+      if (this.safariPortrait) {
+        // Enemy fire starts ~0.75 s into a wave. Avoid allocating a fresh radial
+        // gradient for every muzzle frame at the exact point Safari used to drop.
+        this.ctx.fillStyle = effect.charged ? '#ffd08f' : palette.spark;
+      } else {
+        const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
+        gradient.addColorStop(0, '#ffffff');
+        gradient.addColorStop(0.26, effect.charged ? '#ffd08f' : palette.spark);
+        gradient.addColorStop(1, 'rgba(255,90,40,0)');
+        this.ctx.fillStyle = gradient;
+      }
       this.ctx.shadowBlur = this.vfxGlow(effect.charged ? 20 : 12);
       this.ctx.shadowColor = effect.charged ? '#ff8b4d' : palette.glow;
       this.ctx.beginPath(); this.ctx.arc(x, y, radius, 0, Math.PI * 2); this.ctx.fill();
@@ -4213,6 +4225,29 @@ export class CoreGameplayEngine {
     this.ctx.restore();
   }
 
+  safariHalfTurnSprite(image) {
+    if (!this.safariPortrait || !canDraw(image)) return null;
+    const cached = this.safariHalfTurnSpriteCache.get(image);
+    if (cached) return cached;
+
+    const sourceW = Math.max(1, Number(image.naturalWidth || image.width || 1));
+    const sourceH = Math.max(1, Number(image.naturalHeight || image.height || 1));
+    const maxSide = 384;
+    const scale = Math.min(1, maxSide / Math.max(sourceW, sourceH));
+    const width = Math.max(1, Math.round(sourceW * scale));
+    const height = Math.max(1, Math.round(sourceH * scale));
+    const surface = document.createElement('canvas');
+    surface.width = width;
+    surface.height = height;
+    const cacheCtx = surface.getContext('2d', { alpha: true });
+    if (!cacheCtx) return null;
+    cacheCtx.translate(width, height);
+    cacheCtx.rotate(Math.PI);
+    cacheCtx.drawImage(image, 0, 0, width, height);
+    this.safariHalfTurnSpriteCache.set(image, surface);
+    return surface;
+  }
+
   drawSprite(image, nx, ny, sizePx, rotation = 0) {
     if (!canDraw(image)) return;
     const x = nx * this.canvas.width;
@@ -4221,6 +4256,16 @@ export class CoreGameplayEngine {
     if (Math.abs(rotation) < 0.00001) {
       this.ctx.drawImage(image, x - sizePx / 2, y - sizePx / 2, sizePx, sizePx);
       return;
+    }
+
+    // Most formation enemies sit at exactly PI. Safari can draw the cached
+    // half-turn image directly instead of rebuilding a transform stack 60x/sec.
+    if (this.safariPortrait && Math.abs(Math.abs(rotation) - Math.PI) < 0.00001) {
+      const cached = this.safariHalfTurnSprite(image);
+      if (cached) {
+        this.ctx.drawImage(cached, x - sizePx / 2, y - sizePx / 2, sizePx, sizePx);
+        return;
+      }
     }
 
     this.ctx.save();

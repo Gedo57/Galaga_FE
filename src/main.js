@@ -88,9 +88,9 @@ function closeAudioSettings() {
 function handleAudioEvent(event = {}) {
   const type = String(event.type || '');
   if (type === 'player-fire') {
-    audioManager.playSfx('laser', { volume: event.overdrive ? 0.30 : 0.24, rate: event.overdrive ? 1.18 : 1.06, poolSize: 8 });
+    audioManager.playSfx('laser', { volume: event.overdrive ? 0.30 : 0.24, rate: event.overdrive ? 1.18 : 1.06, poolSize: isSafariTouchBrowser() ? 3 : 8 });
   } else if (type === 'enemy-fire') {
-    audioManager.playSfx('enemyFire', { volume: 0.22, rate: 1, throttleMs: 70, poolSize: 7 });
+    audioManager.playSfx('enemyFire', { volume: 0.22, rate: 1, throttleMs: isSafariTouchBrowser() ? 100 : 70, poolSize: isSafariTouchBrowser() ? 3 : 7 });
   } else if (type === 'enemy-destroyed') {
     const enemyType = String(event.enemyType || '');
     const bossLike = ['miniBoss', 'finalBoss'].includes(enemyType);

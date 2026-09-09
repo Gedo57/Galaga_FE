@@ -20,6 +20,13 @@ const SFX_TRACKS = Object.freeze({
 
 const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
 
+function isSafariTouchDevice() {
+  const ua = String(navigator.userAgent || '');
+  const platform = String(navigator.platform || '');
+  const iosDevice = /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return iosDevice && /WebKit/i.test(ua) && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA)/i.test(ua);
+}
+
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
@@ -38,6 +45,9 @@ class AudioManager {
     this.settings = loadSettings();
     this.unlocked = false;
     this.currentMusicKey = null;
+    // WebKit has a much higher cost for many simultaneous HTMLAudio decoders.
+    // Keep a bounded pool profile on touch Safari; Chrome/desktop behavior stays unchanged.
+    this.safariTouch = isSafariTouchDevice();
     this.music = Object.fromEntries(Object.entries(MUSIC_TRACKS).map(([key, src]) => {
       const node = new Audio(src);
       node.loop = true;
@@ -140,6 +150,19 @@ class AudioManager {
   // Patch 4: construct the hot gameplay pools while the loading screen is still
   // visible. This avoids first-use Audio element allocation during combat.
   prewarmGameplayPools() {
+    if (this.safariTouch) {
+      // Patch 7 — 15 nodes instead of 31. High-frequency combat sounds are
+      // allowed to drop an overlapping voice rather than forcing Safari to
+      // maintain a large set of MP3 decoder/media-element pipelines.
+      this.getPool('laser', 3);
+      this.getPool('enemyFire', 3);
+      this.getPool('enemyDestroy', 3);
+      this.getPool('explosion', 2);
+      this.getPool('waveStart', 1);
+      this.getPool('waveClear', 1);
+      this.getPool('bombBlast', 2);
+      return;
+    }
     this.getPool('laser', 8);
     this.getPool('enemyFire', 7);
     this.getPool('enemyDestroy', 6);
@@ -157,14 +180,29 @@ class AudioManager {
     if (throttleMs > 0 && now - last < throttleMs) return false;
     this.lastSfxAt.set(key, now);
 
-    const poolSize = Math.max(1, Math.min(12, Number(options.poolSize || (key === 'laser' ? 8 : 4))));
-    const pool = this.getPool(key, poolSize);
+    let requestedPoolSize = Math.max(1, Math.min(12, Number(options.poolSize || (key === 'laser' ? 8 : 4))));
+    if (this.safariTouch) {
+      const safariPoolCaps = { laser: 3, enemyFire: 3, enemyDestroy: 3, explosion: 2, chargeUp: 2, diveFlyby: 2, bombBlast: 2, waveStart: 1, waveClear: 1 };
+      requestedPoolSize = Math.min(requestedPoolSize, Number(safariPoolCaps[key] || 2));
+    }
+    const pool = this.getPool(key, requestedPoolSize);
     if (!pool?.nodes?.length) return false;
-    const node = pool.nodes[pool.cursor % pool.nodes.length];
-    pool.cursor = (pool.cursor + 1) % pool.nodes.length;
+
+    let node = pool.nodes[pool.cursor % pool.nodes.length];
+    if (this.safariTouch) {
+      // Prefer an idle voice. If all voices are busy, drop this cosmetic sound
+      // rather than pause/seek an active HTMLAudio element, which is a known
+      // sustained-combat hotspot in WebKit.
+      const idleIndex = pool.nodes.findIndex((candidate) => candidate.paused || candidate.ended);
+      if (idleIndex < 0) return false;
+      node = pool.nodes[idleIndex];
+      pool.cursor = (idleIndex + 1) % pool.nodes.length;
+    } else {
+      pool.cursor = (pool.cursor + 1) % pool.nodes.length;
+    }
 
     try {
-      node.pause();
+      if (!node.paused) node.pause();
       node.currentTime = 0;
       node.playbackRate = Math.max(0.5, Math.min(2, Number(options.rate || 1)));
       node.volume = clamp01(this.settings.sfxVolume * clamp01(options.volume ?? 1));
