@@ -494,9 +494,18 @@ function emitFeedback(text, tone = 'score', options = {}) {
   layer.appendChild(node);
   window.setTimeout(() => node.remove(), options.duration || 1050);
 }
+function isSafariPortraitPerformanceMode() {
+  return document.documentElement.classList.contains('safari-portrait-render');
+}
 function pulseHud(selector, className = 'hud-pop', duration = 420) {
   const node = app.querySelector(selector);
   if (!node) return;
+  // Patch 4: offsetWidth animation restarts force synchronous layout. Safari
+  // portrait keeps the HUD values but skips these cosmetic reflow pulses.
+  if (isSafariPortraitPerformanceMode()) {
+    node.classList.remove(className);
+    return;
+  }
   node.classList.remove(className);
   void node.offsetWidth;
   node.classList.add(className);
@@ -532,6 +541,9 @@ function handleVfxEvent(event = {}) {
   else if (type === 'boss-phase' || type === 'mini-boss-phase') audioManager.playSfx('chargeUp', { volume: 0.34, rate: 0.88, throttleMs: 350, poolSize: 2 });
   const screen = app.querySelector('.gameplay-screen');
   if (!screen) return;
+  // Canvas feedback remains active; Safari portrait avoids DOM class churn,
+  // overlay creation and forced style/layout work during combat.
+  if (isSafariPortraitPerformanceMode()) return;
   if (type === 'wave-start') {
     screen.classList.remove('wave-start-live'); void screen.offsetWidth; screen.classList.add('wave-start-live');
     pulseHud('[data-hud-wave]', 'hud-wave-pop', 720);
@@ -585,6 +597,13 @@ function applyPolishFeedback(snapshot = {}) {
   const nextLives = Number(snapshot.lives ?? visualTelemetry.lives);
   const nextBossPhase = Number(snapshot.finalBossPhase ?? 0);
   const nextOverdrive = Number(snapshot.overdriveActiveRemaining || 0) > 0;
+  if (isSafariPortraitPerformanceMode()) {
+    const nextWave = Number(snapshot.wave ?? model.wave ?? visualTelemetry.wave);
+    const nextTier = bestUnlockedTier(nextWave, nextScore).multiplier;
+    visualTelemetry.score = nextScore; visualTelemetry.damageTaken = nextDamage; visualTelemetry.lives = nextLives;
+    visualTelemetry.bossPhase = nextBossPhase; visualTelemetry.overdriveActive = nextOverdrive; visualTelemetry.wave = nextWave; visualTelemetry.multiplier = nextTier;
+    return;
+  }
   // UI Patch 3 removes duplicate combat text from the center of the playfield.
   // Enemy-local +score/combo feedback is already drawn by the canvas engine, so the DOM only pulses the HUD value.
   if (nextScore > visualTelemetry.score) pulseHud('[data-hud-score]', 'hud-pop');
@@ -613,6 +632,7 @@ function showWaveIntro() {
   if (!layer) return;
   const elapsed = Number(activeEngine?.snapshot?.().waveElapsed ?? model.stats.waveElapsed ?? 0);
   if (elapsed < 1.5) audioManager.playSfx('waveStart', { volume: 0.58, rate: 1, throttleMs: 700, poolSize: 2 });
+  if (isSafariPortraitPerformanceMode()) return;
   const def = waveDefinition(model.wave, activeDifficulty());
   const node = document.createElement('div');
   node.className = `wave-intro-banner ${def.final ? 'final' : ''}`;

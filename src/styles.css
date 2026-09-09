@@ -4062,3 +4062,28 @@ html.safari-portrait-render .gameplay-screen .cinematic-callout {
   18%, 72% { opacity: 1; }
   100% { opacity: 0; }
 }
+
+/* =========================================================
+   PATCH 4 — SAFARI PORTRAIT FRAME-PACING / DOM QUIET MODE
+   Keep the live HUD readable without continuously animating compositor layers.
+   The canvas remains at its CSS size and gameplay layout is unchanged.
+   ========================================================= */
+html.safari-portrait-render .gameplay-screen .game-canvas {
+  transform: none !important;
+  -webkit-transform: none !important;
+  will-change: auto !important;
+}
+
+html.safari-portrait-render .gameplay-screen .gameplay-hud,
+html.safari-portrait-render .gameplay-screen .gameplay-hud *,
+html.safari-portrait-render .gameplay-screen .core-stats-panel,
+html.safari-portrait-render .gameplay-screen .core-stats-panel *,
+html.safari-portrait-render .gameplay-screen .ability-panel,
+html.safari-portrait-render .gameplay-screen .ability-panel *,
+html.safari-portrait-render .gameplay-screen .multiplier-chip,
+html.safari-portrait-render .gameplay-screen .multiplier-chip *,
+html.safari-portrait-render .gameplay-screen [data-feedback-layer] * {
+  animation: none !important;
+  transition: none !important;
+  will-change: auto !important;
+}

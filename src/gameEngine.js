@@ -5,6 +5,7 @@ import { SCORE_VALUES, accuracyBonusRate, comboStepsForDifficulty, comboWindowFo
 const CORE_STATE_SYNC_INTERVAL_SECONDS = 4;
 
 const DANGEROUS_ROUTE_TELEGRAPHS = new Set(['dive', 'charge', 'pincer', 'spiral', 'eliteAssault']);
+const UNDER_BULLET_EFFECTS = new Set(['energyCloud', 'explosion', 'secondaryBurst', 'deathRing', 'coreFlash']);
 const RECOVERY_AFTER_ATTACK = Object.freeze({ pincer: 0.30, charge: 0.34, crossfire: 0.30, eliteAssault: 0.38 });
 
 
@@ -314,6 +315,10 @@ export class CoreGameplayEngine {
     this.safariStable30 = false;
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
+    // Patch 4 — Safari uses a real-time 60 Hz presentation buffer instead of
+    // the old one-way 30 FPS fallback. This absorbs 120 Hz rAF callbacks and
+    // small WebKit timestamp jitter without skipping visible 60 Hz frames.
+    this.safariFrameBufferMs = 0;
     this.hudDirty = false;
     this.hudFlushClock = 0;
     this.running = false;
@@ -540,19 +545,12 @@ export class CoreGameplayEngine {
       this.fastRenderMs = Math.max(0, this.fastRenderMs - frameMs * 0.5);
     }
 
-    // Safari-specific stability fallback: a fluctuating 35–55 FPS feels worse
-    // than a paced 30 FPS render. Lock only after sustained misses; do not
-    // change update cadence, collision, AI, timers or pointer sampling.
-    if (this.safariPortrait && !this.safariStable30) {
-      if (this.renderFrameEmaMs > 22.5) {
-        this.safariSlowLockMs += frameMs;
-        if (this.safariSlowLockMs >= 850) {
-          this.safariStable30 = true;
-          this.lastDrawTime = time;
-        }
-      } else if (this.renderFrameEmaMs < 19.5) {
-        this.safariSlowLockMs = Math.max(0, this.safariSlowLockMs - frameMs * 2);
-      }
+    // Patch 4: never force Safari into a permanent 30 FPS presentation lock.
+    // The low-cost Safari render profile stays active, while frame pacing is
+    // handled directly by frame() against real elapsed time.
+    if (this.safariPortrait) {
+      this.safariStable30 = false;
+      this.safariSlowLockMs = 0;
     }
   }
 
@@ -589,6 +587,7 @@ export class CoreGameplayEngine {
     this.safariStable30 = false;
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
+    this.safariFrameBufferMs = 0;
     this.hudDirty = false;
     this.hudFlushClock = 0;
     window.addEventListener('resize', this.boundResize, { passive: true });
@@ -663,8 +662,9 @@ export class CoreGameplayEngine {
       this.safariStable30 = false;
       this.safariSlowLockMs = 0;
       this.lastDrawTime = 0;
-    this.hudDirty = false;
-    this.hudFlushClock = 0;
+      this.safariFrameBufferMs = 0;
+      this.hudDirty = false;
+      this.hudFlushClock = 0;
     }
   }
 
@@ -760,6 +760,40 @@ export class CoreGameplayEngine {
     const rawMs = Math.min(100, Math.max(0, time - this.lastTime));
     this.lastTime = time;
 
+    // Patch 4 — Safari portrait frame pacing.
+    // Do not use the fixed 16.667 ms accumulator here: WebKit rAF timestamps
+    // commonly oscillate slightly around the boundary, which caused periodic
+    // update/render skips. Instead collect real elapsed time and present at a
+    // maximum of ~60 Hz. On 120 Hz displays this naturally consumes two rAF
+    // callbacks per game frame; on 60 Hz displays it consumes every callback.
+    if (this.safariPortrait) {
+      this.safariFrameBufferMs = Math.min(50, Number(this.safariFrameBufferMs || 0) + rawMs);
+      const sinceDraw = this.lastDrawTime ? time - this.lastDrawTime : 1000;
+      // 14 ms is deliberately below 16.667 ms so normal 60 Hz timestamp jitter
+      // never drops a visible frame, while 120 Hz callbacks are still capped.
+      if (sinceDraw < 14) {
+        this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
+        return;
+      }
+
+      this.flushPointerInput();
+      const frameMs = Math.min(34, Math.max(1, this.safariFrameBufferMs));
+      this.safariFrameBufferMs = 0;
+      // Split only genuinely late frames so collision/AI integration remains
+      // stable without doing the old update-update-draw catch-up on normal frames.
+      const substeps = frameMs > 22 ? 2 : 1;
+      const dt = (frameMs / 1000) / substeps;
+      for (let step = 0; step < substeps; step += 1) {
+        this.elapsed += dt;
+        this.update(dt);
+      }
+      this.draw();
+      this.lastDrawTime = time;
+      this.observeRenderPerformance(time);
+      this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
+      return;
+    }
+
     if (this.mobilePortrait) {
       this.frameAccumulatorMs = Math.min(this.targetFrameMs * 2, this.frameAccumulatorMs + rawMs);
       if (this.frameAccumulatorMs + 0.01 < this.targetFrameMs) {
@@ -774,19 +808,9 @@ export class CoreGameplayEngine {
         this.update(dt);
       }
       this.frameAccumulatorMs -= steps * this.targetFrameMs;
-
-      // Patch 2: if Safari has fallen back to stable-30 presentation, rAF still
-      // drives input + 60 Hz simulation, but Canvas drawing is paced at 30 FPS.
-      const safariRenderInterval = 1000 / 30;
-      const shouldDraw = !this.safariPortrait
-        || !this.safariStable30
-        || !this.lastDrawTime
-        || (time - this.lastDrawTime) >= safariRenderInterval - 1;
-      if (shouldDraw) {
-        this.draw();
-        this.lastDrawTime = time;
-        this.observeRenderPerformance(time);
-      }
+      this.draw();
+      this.lastDrawTime = time;
+      this.observeRenderPerformance(time);
     } else {
       this.flushPointerInput();
       const dt = Math.min(0.034, rawMs / 1000);
@@ -830,7 +854,7 @@ export class CoreGameplayEngine {
     this.updateEffects(dt);
     if (this.safariPortrait && this.hudDirty) {
       this.hudFlushClock += dt;
-      if (this.hudFlushClock >= 0.12) this.flushHud();
+      if (this.hudFlushClock >= 0.16) this.flushHud();
     }
     this.updateEnemyFire(dt);
     this.updateFormationLifecycle(dt);
@@ -1536,6 +1560,17 @@ export class CoreGameplayEngine {
     vfx.muzzleTimer = Math.max(0, vfx.muzzleTimer - dt);
     vfx.hitTimer = Math.max(0, vfx.hitTimer - dt);
 
+    // Patch 4: Patch 3 stopped drawing these histories on Safari, but the old
+    // update path still allocated trail/particle objects and replacement arrays
+    // every frame. Stop that hidden GC pressure at the source.
+    if (this.safariPortrait) {
+      if (vfx.trailPoints.length) vfx.trailPoints.length = 0;
+      if (this.thrusterParticles.length) this.thrusterParticles.length = 0;
+      vfx.trailClock = 0;
+      vfx.thrusterClock = 0;
+      return;
+    }
+
     // VFX Patch 2: retain a short presentation-only history so the player ship
     // leaves a readable cyan engine ribbon that bends with lateral movement.
     const adaptiveLevel = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
@@ -1900,24 +1935,31 @@ export class CoreGameplayEngine {
 
       this.updateAttackEnemy(enemy, dt);
       const attacking = Number(enemy.attackTime || 0) >= 0;
-      if (attacking && ['diver', 'charger', 'elite'].includes(enemy.type)) {
-        enemy.trailClock = Number(enemy.trailClock || 0) - dt;
-        if (enemy.trailClock <= 0) {
-          const level = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
-          const intervalScale = level >= 2 ? 1.8 : level === 1 ? 1.35 : 1;
-          enemy.trailClock = this.mobilePortrait
-            ? (enemy.type === 'charger' ? 0.060 : 0.085) * intervalScale
-            : (enemy.type === 'charger' ? 0.035 : 0.055);
-          enemy.trailPoints ||= [];
-          enemy.trailPoints.unshift({ x: enemy.x, y: enemy.y, rotation: enemy.rotation ?? Math.PI, age: 0 });
-          const portraitCap = level >= 2 ? (enemy.type === 'charger' ? 2 : 1) : level === 1 ? (enemy.type === 'charger' ? 3 : 2) : (enemy.type === 'charger' ? 4 : 3);
-          enemy.trailPoints = enemy.trailPoints.slice(0, this.mobilePortrait ? portraitCap : (enemy.type === 'charger' ? 7 : 5));
+      if (this.safariPortrait) {
+        // Patch 4: trails are not rendered in Safari portrait, so do not create,
+        // age, filter or slice their backing arrays on the hot update path.
+        if (enemy.trailPoints?.length) enemy.trailPoints.length = 0;
+        enemy.trailClock = 0;
+      } else {
+        if (attacking && ['diver', 'charger', 'elite'].includes(enemy.type)) {
+          enemy.trailClock = Number(enemy.trailClock || 0) - dt;
+          if (enemy.trailClock <= 0) {
+            const level = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
+            const intervalScale = level >= 2 ? 1.8 : level === 1 ? 1.35 : 1;
+            enemy.trailClock = this.mobilePortrait
+              ? (enemy.type === 'charger' ? 0.060 : 0.085) * intervalScale
+              : (enemy.type === 'charger' ? 0.035 : 0.055);
+            enemy.trailPoints ||= [];
+            enemy.trailPoints.unshift({ x: enemy.x, y: enemy.y, rotation: enemy.rotation ?? Math.PI, age: 0 });
+            const portraitCap = level >= 2 ? (enemy.type === 'charger' ? 2 : 1) : level === 1 ? (enemy.type === 'charger' ? 3 : 2) : (enemy.type === 'charger' ? 4 : 3);
+            enemy.trailPoints = enemy.trailPoints.slice(0, this.mobilePortrait ? portraitCap : (enemy.type === 'charger' ? 7 : 5));
+          }
         }
+        for (const point of enemy.trailPoints || []) point.age += dt;
+        const level = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
+        const portraitLife = level >= 2 ? 0.14 : level === 1 ? 0.18 : 0.22;
+        enemy.trailPoints = (enemy.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? portraitLife : 0.32));
       }
-      for (const point of enemy.trailPoints || []) point.age += dt;
-      const level = this.mobilePortrait ? this.adaptiveVfxLevel : 0;
-      const portraitLife = level >= 2 ? 0.14 : level === 1 ? 0.18 : 0.22;
-      enemy.trailPoints = (enemy.trailPoints || []).filter((point) => point.age < (this.mobilePortrait ? portraitLife : 0.32));
 
       if (enemy.mode === 'formation') {
         enemy.rotation = Math.PI;
@@ -2036,21 +2078,33 @@ export class CoreGameplayEngine {
   }
 
   updatePlayerBullets(dt) {
-    for (const bullet of this.playerBullets) {
+    let write = 0;
+    for (let i = 0; i < this.playerBullets.length; i += 1) {
+      const bullet = this.playerBullets[i];
       bullet.age = Number(bullet.age || 0) + dt;
       bullet.x += bullet.vx * dt;
       bullet.y += bullet.vy * dt;
+      if (this.safariPortrait) {
+        if (bullet.y > -0.08 && bullet.x > -0.08 && bullet.x < 1.08) this.playerBullets[write++] = bullet;
+      }
     }
-    this.playerBullets = this.playerBullets.filter((bullet) => bullet.y > -0.08 && bullet.x > -0.08 && bullet.x < 1.08);
+    if (this.safariPortrait) this.playerBullets.length = write;
+    else this.playerBullets = this.playerBullets.filter((bullet) => bullet.y > -0.08 && bullet.x > -0.08 && bullet.x < 1.08);
   }
 
   updateEnemyBullets(dt) {
-    for (const bullet of this.enemyBullets) {
+    let write = 0;
+    for (let i = 0; i < this.enemyBullets.length; i += 1) {
+      const bullet = this.enemyBullets[i];
       bullet.age = Number(bullet.age || 0) + dt;
       bullet.x += bullet.vx * dt;
       bullet.y += bullet.vy * dt;
+      if (this.safariPortrait) {
+        if (bullet.y < 1.08 && bullet.y > -0.1 && bullet.x > -0.12 && bullet.x < 1.12) this.enemyBullets[write++] = bullet;
+      }
     }
-    this.enemyBullets = this.enemyBullets.filter((bullet) => bullet.y < 1.08 && bullet.y > -0.1 && bullet.x > -0.12 && bullet.x < 1.12);
+    if (this.safariPortrait) this.enemyBullets.length = write;
+    else this.enemyBullets = this.enemyBullets.filter((bullet) => bullet.y < 1.08 && bullet.y > -0.1 && bullet.x > -0.12 && bullet.x < 1.12);
   }
 
   updateEnemyShotTelegraphs(dt) {
@@ -2398,6 +2452,14 @@ export class CoreGameplayEngine {
     const hitX = Number(impact?.x ?? enemy.x);
     const hitY = Number(impact?.y ?? enemy.y);
     this.effects.push({ x: hitX, y: hitY, age: 0, duration: 0.16, kind: 'hit', enemyType: enemy.type });
+    if (this.safariPortrait) {
+      if (enemy.hp <= 0) this.killEnemy(enemy);
+      else {
+        this.emitAudio('enemy-hit', { enemyType: enemy.type, hp: enemy.hp, maxHp: enemy.maxHp });
+        this.emitHud();
+      }
+      return;
+    }
     this.effects.push({ x: hitX, y: hitY, age: 0, duration: 0.19, kind: 'impactRing', color: palette.spark });
 
     // Directional sparks fan back from the incoming projectile instead of exploding radially.
@@ -2446,14 +2508,12 @@ export class CoreGameplayEngine {
     this.comboTimer = this.comboWindow;
     this.addOverdriveEnergy(4);
     this.spawnEnemyDeathVfx(enemy);
-    this.effects.push({ x: enemy.x, y: enemy.y - 0.025, age: 0, duration: 0.72, kind: 'scoreText', text: `+${award.toLocaleString()}`, color: '#effcff' });
-    if (dangerKill) {
-      this.effects.push({ x: enemy.x, y: enemy.y + 0.012, age: 0, duration: 0.68, kind: 'riskText', text: 'RISK +25%', color: '#ffbf79' });
-      this.emitVfx('danger-kill', { enemyType: enemy.type, baseAward, dangerBonus, multiplier });
+    if (!this.safariPortrait) {
+      this.effects.push({ x: enemy.x, y: enemy.y - 0.025, age: 0, duration: 0.72, kind: 'scoreText', text: `+${award.toLocaleString()}`, color: '#effcff' });
+      if (dangerKill) this.effects.push({ x: enemy.x, y: enemy.y + 0.012, age: 0, duration: 0.68, kind: 'riskText', text: 'RISK +25%', color: '#ffbf79' });
+      if (nextCombo > previousCombo) this.effects.push({ x: enemy.x, y: enemy.y + 0.035, age: 0, duration: 0.82, kind: 'comboText', text: `COMBO x${nextCombo}`, color: '#7ff2ff' });
     }
-    if (nextCombo > previousCombo) {
-      this.effects.push({ x: enemy.x, y: enemy.y + 0.035, age: 0, duration: 0.82, kind: 'comboText', text: `COMBO x${nextCombo}`, color: '#7ff2ff' });
-    }
+    if (dangerKill) this.emitVfx('danger-kill', { enemyType: enemy.type, baseAward, dangerBonus, multiplier });
     if (['heavy', 'charger', 'elite', 'miniBoss'].includes(enemy.type)) this.triggerShake(enemy.type === 'miniBoss' ? 0.72 : 0.24, enemy.type === 'miniBoss' ? 0.30 : 0.12);
     if (enemy.type === 'finalBoss') {
       this.cleanupFinalBossAdds(enemy.id);
@@ -2501,15 +2561,9 @@ export class CoreGameplayEngine {
       return;
     }
     if (this.safariPortrait) {
-      const duration = boss ? 0.58 : heavy ? 0.40 : 0.30;
+      const duration = boss ? 0.52 : heavy ? 0.34 : 0.24;
       this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration, kind: 'explosion', enemyType: enemy.type, color: palette.burst, bomb });
-      if (boss || heavy) this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: duration * 0.72, kind: 'deathRing', enemyType: enemy.type, color: palette.burst, strength: boss ? 1.3 : 1 });
-      const fragments = boss ? 3 : heavy ? 2 : 1;
-      for (let i = 0; i < fragments; i += 1) {
-        const angle = this.random() * Math.PI * 2;
-        const speed = 0.08 + this.random() * 0.10;
-        this.effects.push({ x: enemy.x, y: enemy.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, age: 0, duration: 0.28, kind: 'debris', color: i % 2 ? palette.spark : palette.burst, size: 0.7 });
-      }
+      if (boss || heavy) this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: duration * 0.68, kind: 'deathRing', enemyType: enemy.type, color: palette.burst, strength: boss ? 1.2 : 0.9 });
       return;
     }
     const duration = boss ? 0.78 : heavy ? 0.50 : 0.36;
@@ -2585,14 +2639,23 @@ export class CoreGameplayEngine {
   }
 
   updateEffects(dt) {
-    for (const effect of this.effects) {
+    let write = 0;
+    for (let i = 0; i < this.effects.length; i += 1) {
+      const effect = this.effects[i];
       effect.age += dt;
       if (Number.isFinite(effect.vx)) effect.x += effect.vx * dt;
       if (Number.isFinite(effect.vy)) effect.y += effect.vy * dt;
       if (effect.kind === 'debris') effect.vy += 0.10 * dt;
+      if (this.safariPortrait) {
+        if (effect.age < effect.duration) this.effects[write++] = effect;
+      }
     }
-    this.effects = this.effects.filter((effect) => effect.age < effect.duration);
-    if (this.safariPortrait && this.effects.length > 36) this.effects = this.effects.slice(-36);
+    if (this.safariPortrait) {
+      this.effects.length = write;
+      if (this.effects.length > 24) this.effects.splice(0, this.effects.length - 24);
+    } else {
+      this.effects = this.effects.filter((effect) => effect.age < effect.duration);
+    }
   }
 
   snapshot() {
@@ -2857,6 +2920,31 @@ export class CoreGameplayEngine {
     const laneHalf = this.bossLaser.width * dim.width;
     const top = dim.height * 0.08;
     const bottom = dim.height * 0.94;
+    if (this.safariPortrait) {
+      this.ctx.save();
+      if (this.bossLaser.telegraph > 0) {
+        const duration = Math.max(0.01, Number(this.bossLaser.telegraphDuration || this.bossLaser.telegraph));
+        const progress = 1 - clamp(this.bossLaser.telegraph / duration, 0, 1);
+        this.ctx.globalAlpha = 0.12 + progress * 0.12;
+        this.ctx.fillStyle = '#ff5c45';
+        this.ctx.fillRect(x - laneHalf, top, laneHalf * 2, bottom - top);
+        this.ctx.globalAlpha = 0.78;
+        this.ctx.strokeStyle = '#ffb08d';
+        this.ctx.lineWidth = Math.max(1.5, dim.min * 0.0028);
+        this.ctx.beginPath();
+        this.ctx.moveTo(x - laneHalf, top); this.ctx.lineTo(x - laneHalf, bottom);
+        this.ctx.moveTo(x + laneHalf, top); this.ctx.lineTo(x + laneHalf, bottom);
+        this.ctx.stroke();
+      }
+      if (this.bossLaserFireFlashTimer > 0) {
+        const life = clamp(this.bossLaserFireFlashTimer / 0.22, 0, 1);
+        this.ctx.globalAlpha = life * 0.34;
+        this.ctx.fillStyle = '#fff0df';
+        this.ctx.fillRect(x - laneHalf * 1.35, top, laneHalf * 2.7, bottom - top);
+      }
+      this.ctx.restore();
+      return;
+    }
     if (this.bossLaser.telegraph > 0) {
       const duration = Math.max(0.01, Number(this.bossLaser.telegraphDuration || this.bossLaser.telegraph));
       const progress = 1 - clamp(this.bossLaser.telegraph / duration, 0, 1);
@@ -3026,10 +3114,9 @@ export class CoreGameplayEngine {
 
     for (const bullet of this.playerBullets) this.drawPlayerProjectile(bullet, dim);
 
-    const underBulletEffects = new Set(['energyCloud', 'explosion', 'secondaryBurst', 'deathRing', 'coreFlash']);
-    for (const effect of this.effects) if (underBulletEffects.has(effect.kind)) this.drawCombatEffect(effect, dim);
+    for (const effect of this.effects) if (UNDER_BULLET_EFFECTS.has(effect.kind)) this.drawCombatEffect(effect, dim);
     for (const bullet of this.enemyBullets) this.drawEnemyProjectile(bullet, dim);
-    for (const effect of this.effects) if (!underBulletEffects.has(effect.kind)) this.drawCombatEffect(effect, dim);
+    for (const effect of this.effects) if (!UNDER_BULLET_EFFECTS.has(effect.kind)) this.drawCombatEffect(effect, dim);
 
     this.drawBossPhaseBurst(dim);
     this.drawThrusterParticles(dim);
@@ -3319,6 +3406,27 @@ export class CoreGameplayEngine {
     const targetX = Number(attack.targetX ?? this.player.x) * dim.width;
     const targetY = Number(attack.targetY ?? this.player.y) * dim.height;
     const charge = attack.kind === 'charge';
+
+    if (this.safariPortrait) {
+      // Gameplay-critical warning stays visible, but WebKit avoids dashed lines,
+      // animated dash offsets and multi-pass route drawing.
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.68 + (1 - remaining) * 0.22;
+      this.ctx.strokeStyle = charge ? '#ff715d' : palette.glow;
+      this.ctx.lineWidth = Math.max(1.5, dim.min * 0.0032);
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, state.size * (0.34 + (1 - remaining) * 0.12), 0, Math.PI * 2);
+      this.ctx.stroke();
+      if (charge) {
+        this.ctx.globalAlpha *= 0.72;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, y + state.size * 0.20);
+        this.ctx.lineTo(targetX, targetY);
+        this.ctx.stroke();
+      }
+      this.ctx.restore();
+      return;
+    }
 
     this.drawAttackRouteTelegraph(enemy, state, dim, palette, remaining);
 
@@ -3914,6 +4022,24 @@ export class CoreGameplayEngine {
         : Math.max(dim.height * 0.132, 104);
     const ratio = clamp(Number(boss.hp || 0) / Math.max(1, Number(boss.maxHp || 1)), 0, 1);
     const final = boss.type === 'finalBoss';
+    if (this.safariPortrait) {
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.96;
+      this.ctx.fillStyle = 'rgba(1, 8, 22, .92)';
+      this.ctx.fillRect(x - 2, y - 2, width + 4, height + 4);
+      this.ctx.fillStyle = 'rgba(7, 22, 43, .98)';
+      this.ctx.fillRect(x, y, width, height);
+      const fillWidth = Math.max(0, (width - 4) * ratio);
+      if (fillWidth > 0) {
+        this.ctx.fillStyle = final ? '#ff7650' : '#63dfff';
+        this.ctx.fillRect(x + 2, y + 2, fillWidth, Math.max(1, height - 4));
+      }
+      this.ctx.strokeStyle = final ? '#ff9a6c' : '#70e7ff';
+      this.ctx.lineWidth = 1;
+      this.ctx.strokeRect(x, y, width, height);
+      this.ctx.restore();
+      return;
+    }
     const phase = final ? this.finalBossPhase(boss) : this.miniBossPhase(boss);
     const percent = Math.round(ratio * 100);
 
@@ -3973,6 +4099,7 @@ export class CoreGameplayEngine {
   }
 
   drawPatternBanner(label, dim) {
+    if (this.safariPortrait) return;
     const alpha = clamp(this.patternBanner.timer / 0.35, 0, 1);
     const text = String(label || 'PATTERN').toUpperCase();
     this.ctx.save();
