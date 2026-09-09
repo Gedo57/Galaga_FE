@@ -232,6 +232,17 @@ function isPortraitMobile() {
   return isTouchPrimary() && portrait && shortSide > 0 && shortSide <= 1024;
 }
 
+// Patch 1 — Safari mobile render profile. iPadOS may report itself as macOS,
+// so maxTouchPoints is included in the iOS detection. The browser exclusion
+// keeps this profile scoped to Safari instead of changing Android/desktop Chrome.
+function isSafariMobile() {
+  const ua = String(navigator.userAgent || '');
+  const platform = String(navigator.platform || '');
+  const iosDevice = /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (!iosDevice || !/WebKit/i.test(ua) || !isTouchPrimary()) return false;
+  return !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA)/i.test(ua);
+}
+
 function hashSeed(value) {
   let hash = 2166136261;
   const text = String(value || 'phase-8');
@@ -274,6 +285,8 @@ export class CoreGameplayEngine {
     this.images = createGameplayImageView();
     this.touchMode = isTouchPrimary();
     this.mobilePortrait = isPortraitMobile();
+    this.safariMobile = isSafariMobile();
+    this.safariPortrait = this.safariMobile && this.mobilePortrait;
     this.targetFrameMs = 1000 / 60;
     this.frameAccumulatorMs = 0;
 
@@ -286,11 +299,20 @@ export class CoreGameplayEngine {
 
     // Presentation-only adaptive VFX. Levels: 0 = Patch-1 quality, 1 = balanced,
     // 2 = low-cost. It never changes simulation speed, collision, fire rate or AI.
-    this.adaptiveVfxLevel = 0;
+    // Safari portrait starts on the low-cost presentation tier immediately;
+    // other browsers keep the existing adaptive behavior.
+    this.adaptiveVfxLevel = this.safariPortrait ? 2 : 0;
     this.renderFrameEmaMs = this.targetFrameMs;
     this.lastRenderSampleTime = 0;
     this.slowRenderMs = 0;
     this.fastRenderMs = 0;
+
+    // Patch 2 — Safari frame-stability guard. Start at 60 FPS and only lock
+    // presentation to 30 FPS after Safari proves it cannot sustain the 60 FPS
+    // render budget. Simulation/input continue stepping at 60 Hz.
+    this.safariStable30 = false;
+    this.safariSlowLockMs = 0;
+    this.lastDrawTime = 0;
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -324,7 +346,7 @@ export class CoreGameplayEngine {
     this.waveStartFxTimer = this.waveElapsed < 1.5 ? 1.25 : 0;
     this.bossLaserFireFlashTimer = 0;
     this.vfxRandom = makeRandom(`${options.seed || options.sessionId || 'phase-8-preview'}:vfx:wave:${this.currentWave}`);
-    this.ambientParticles = Array.from({ length: this.reducedMotion ? 24 : (this.mobilePortrait ? 28 : 58) }, (_, index) => ({
+    this.ambientParticles = Array.from({ length: this.reducedMotion ? 24 : (this.safariPortrait ? 16 : (this.mobilePortrait ? 28 : 58)) }, (_, index) => ({
       x: this.vfxRandom(), y: this.vfxRandom(), size: 0.35 + this.vfxRandom() * 1.4,
       speed: 0.006 + this.vfxRandom() * 0.018, alpha: 0.16 + this.vfxRandom() * 0.42,
       drift: (this.vfxRandom() - 0.5) * 0.012, layer: index % 3
@@ -424,6 +446,7 @@ export class CoreGameplayEngine {
 
   adaptiveVfxScale() {
     if (!this.mobilePortrait) return 1;
+    if (this.safariPortrait) return 0;
     if (this.adaptiveVfxLevel >= 2) return 0.54;
     if (this.adaptiveVfxLevel === 1) return 0.76;
     return 1;
@@ -431,7 +454,15 @@ export class CoreGameplayEngine {
 
   vfxGlow(value) {
     const numeric = Math.max(0, Number(value) || 0);
+    // shadowBlur is disproportionately expensive on iOS Safari's Canvas 2D
+    // compositor. Keep silhouettes/sprites intact and drop only the blur halo.
+    if (this.safariPortrait) return 0;
     return this.mobilePortrait ? numeric * 0.58 * this.adaptiveVfxScale() : numeric;
+  }
+
+  vfxComposite(mode = 'source-over') {
+    // Additive blending can trigger costly offscreen compositing in Safari.
+    return this.safariPortrait && mode === 'lighter' ? 'source-over' : mode;
   }
 
   cacheCanvasRect(force = false) {
@@ -471,7 +502,7 @@ export class CoreGameplayEngine {
     // Patch 6: Overdrive keeps the portrait renderer at least on the balanced
     // cosmetic profile for its seven-second lifetime. Simulation stays at full
     // fidelity; only presentation work is reduced.
-    const adaptiveFloor = this.overdriveTimer > 0 ? 1 : 0;
+    const adaptiveFloor = this.safariPortrait ? 2 : (this.overdriveTimer > 0 ? 1 : 0);
     if (this.adaptiveVfxLevel < adaptiveFloor) this.adaptiveVfxLevel = adaptiveFloor;
 
     if (!this.lastRenderSampleTime) {
@@ -505,6 +536,21 @@ export class CoreGameplayEngine {
       this.slowRenderMs = Math.max(0, this.slowRenderMs - frameMs * 0.5);
       this.fastRenderMs = Math.max(0, this.fastRenderMs - frameMs * 0.5);
     }
+
+    // Safari-specific stability fallback: a fluctuating 35–55 FPS feels worse
+    // than a paced 30 FPS render. Lock only after sustained misses; do not
+    // change update cadence, collision, AI, timers or pointer sampling.
+    if (this.safariPortrait && !this.safariStable30) {
+      if (this.renderFrameEmaMs > 22.5) {
+        this.safariSlowLockMs += frameMs;
+        if (this.safariSlowLockMs >= 850) {
+          this.safariStable30 = true;
+          this.lastDrawTime = time;
+        }
+      } else if (this.renderFrameEmaMs < 19.5) {
+        this.safariSlowLockMs = Math.max(0, this.safariSlowLockMs - frameMs * 2);
+      }
+    }
   }
 
   emitVfx(type, payload = {}) {
@@ -537,6 +583,9 @@ export class CoreGameplayEngine {
     this.renderFrameEmaMs = this.targetFrameMs;
     this.slowRenderMs = 0;
     this.fastRenderMs = 0;
+    this.safariStable30 = false;
+    this.safariSlowLockMs = 0;
+    this.lastDrawTime = 0;
     window.addEventListener('resize', this.boundResize, { passive: true });
     window.visualViewport?.addEventListener('resize', this.boundViewportResize, { passive: true });
     window.addEventListener('keydown', this.boundKeyDown, { passive: false });
@@ -568,6 +617,7 @@ export class CoreGameplayEngine {
     this.pendingPointerClientX = null;
     this.pendingPointerId = null;
     this.canvasRect = null;
+    document.documentElement.classList.remove('safari-portrait-render');
     if (this.bombSnapshotTimer) {
       window.clearTimeout(this.bombSnapshotTimer);
       this.bombSnapshotTimer = 0;
@@ -577,8 +627,14 @@ export class CoreGameplayEngine {
   resize() {
     const rect = this.cacheCanvasRect(true);
     const wasMobilePortrait = this.mobilePortrait;
+    const wasSafariPortrait = this.safariPortrait;
     this.mobilePortrait = isPortraitMobile();
-    const dprCap = this.mobilePortrait ? 1.5 : 2;
+    this.safariMobile = isSafariMobile();
+    this.safariPortrait = this.safariMobile && this.mobilePortrait;
+    document.documentElement.classList.toggle('safari-portrait-render', this.safariPortrait);
+    // Safari portrait renders materially fewer backing-store pixels. CSS size
+    // is unchanged, so layout/input coordinates and gameplay remain identical.
+    const dprCap = this.safariPortrait ? 1.25 : (this.mobilePortrait ? 1.5 : 2);
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
@@ -590,12 +646,18 @@ export class CoreGameplayEngine {
     if (!wasMobilePortrait && this.mobilePortrait && this.ambientParticles?.length > 28) {
       this.ambientParticles = this.ambientParticles.slice(0, 28);
     }
-    if (wasMobilePortrait !== this.mobilePortrait) {
-      this.adaptiveVfxLevel = 0;
+    if (this.safariPortrait && this.ambientParticles?.length > 16) {
+      this.ambientParticles = this.ambientParticles.slice(0, 16);
+    }
+    if (wasMobilePortrait !== this.mobilePortrait || wasSafariPortrait !== this.safariPortrait) {
+      this.adaptiveVfxLevel = this.safariPortrait ? 2 : 0;
       this.renderFrameEmaMs = this.targetFrameMs;
       this.lastRenderSampleTime = 0;
       this.slowRenderMs = 0;
       this.fastRenderMs = 0;
+      this.safariStable30 = false;
+      this.safariSlowLockMs = 0;
+      this.lastDrawTime = 0;
     }
   }
 
@@ -705,8 +767,19 @@ export class CoreGameplayEngine {
         this.update(dt);
       }
       this.frameAccumulatorMs -= steps * this.targetFrameMs;
-      this.draw();
-      this.observeRenderPerformance(time);
+
+      // Patch 2: if Safari has fallen back to stable-30 presentation, rAF still
+      // drives input + 60 Hz simulation, but Canvas drawing is paced at 30 FPS.
+      const safariRenderInterval = 1000 / 30;
+      const shouldDraw = !this.safariPortrait
+        || !this.safariStable30
+        || !this.lastDrawTime
+        || (time - this.lastDrawTime) >= safariRenderInterval - 1;
+      if (shouldDraw) {
+        this.draw();
+        this.lastDrawTime = time;
+        this.observeRenderPerformance(time);
+      }
     } else {
       this.flushPointerInput();
       const dt = Math.min(0.034, rawMs / 1000);
@@ -2546,7 +2619,7 @@ export class CoreGameplayEngine {
     if (!this.ambientParticles?.length) return;
     const { ctx } = this;
     ctx.save();
-    ctx.globalCompositeOperation = this.mobilePortrait && this.adaptiveVfxLevel >= 2 ? 'source-over' : 'lighter';
+    ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait && this.adaptiveVfxLevel >= 2 ? 'source-over' : 'lighter');
     const particleLimit = this.mobilePortrait
       ? Math.min(this.ambientParticles.length, this.adaptiveVfxLevel >= 2 ? 14 : this.adaptiveVfxLevel === 1 ? 20 : 28)
       : this.ambientParticles.length;
@@ -2578,7 +2651,7 @@ export class CoreGameplayEngine {
     const y = this.player.y * dim.height;
     const radius = dim.min * (0.08 + progress * 0.30);
     this.ctx.save();
-    this.ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait ? 'source-over' : 'lighter');
     this.ctx.globalAlpha = alpha * (this.mobilePortrait ? 0.78 : 1);
     this.ctx.strokeStyle = '#91f7ff';
     this.ctx.lineWidth = Math.max(2, dim.min * 0.006 * (1 - progress * 0.65));
@@ -2613,7 +2686,7 @@ export class CoreGameplayEngine {
     glow.addColorStop(0, boss.type === 'finalBoss' ? 'rgba(255,102,50,.30)' : 'rgba(255,169,80,.23)');
     glow.addColorStop(0.36, boss.type === 'finalBoss' ? 'rgba(255,60,35,.10)' : 'rgba(255,133,50,.07)');
     glow.addColorStop(1, 'rgba(0,0,0,0)');
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = life * 0.95;
     this.ctx.fillStyle = glow;
     this.ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
@@ -2632,7 +2705,7 @@ export class CoreGameplayEngine {
     const primary = boss.type === 'finalBoss' ? '#ffb16f' : '#ffd18a';
     const glow = boss.type === 'finalBoss' ? '#ff6438' : '#ff9b4f';
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = alpha;
     this.ctx.strokeStyle = primary;
     this.ctx.lineWidth = Math.max(2, dim.min * 0.007 * (1 - progress * 0.7));
@@ -2665,7 +2738,7 @@ export class CoreGameplayEngine {
     const final = this.currentWave === 10;
     const accent = final ? '255,105,62' : '91,229,255';
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     const band = this.ctx.createLinearGradient(0, y - dim.min * 0.06, 0, y + dim.min * 0.06);
     band.addColorStop(0, 'rgba(0,0,0,0)');
     band.addColorStop(0.5, `rgba(${accent},${0.10 * fade})`);
@@ -2711,7 +2784,7 @@ export class CoreGameplayEngine {
       this.ctx.fillRect(0, 0, dim.width, dim.height);
     }
     if (!this.reducedMotion) {
-      this.ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait ? 'source-over' : 'lighter');
       this.ctx.lineCap = 'round';
       const overdriveLaneCount = this.mobilePortrait ? 6 : 12;
       for (let i = 0; i < overdriveLaneCount; i += 1) {
@@ -2753,7 +2826,7 @@ export class CoreGameplayEngine {
       lane.addColorStop(1, 'rgba(255,50,50,0)');
       this.ctx.fillStyle = lane;
       this.ctx.fillRect(x - laneHalf * 2.1, top, laneHalf * 4.2, bottom - top);
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = pulse;
       this.ctx.strokeStyle = '#ff8f72';
       this.ctx.lineWidth = Math.max(1.5, dim.min * 0.0028);
@@ -2782,7 +2855,7 @@ export class CoreGameplayEngine {
     if (this.bossLaserFireFlashTimer > 0) {
       const life = clamp(this.bossLaserFireFlashTimer / 0.22, 0, 1);
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = life * 0.52;
       const flash = this.ctx.createLinearGradient(x - laneHalf * 2.2, 0, x + laneHalf * 2.2, 0);
       flash.addColorStop(0, 'rgba(255,120,80,0)');
@@ -2801,7 +2874,7 @@ export class CoreGameplayEngine {
     const bx = this.player.x * dim.width;
     const by = this.player.y * dim.height;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait ? 'source-over' : 'lighter');
     // A very short white core, then cyan rays; all presentation-only.
     const whiteCore = clamp((life - 0.72) / 0.28, 0, 1);
     if (whiteCore > 0) {
@@ -2866,7 +2939,7 @@ export class CoreGameplayEngine {
       const bx = this.player.x * dim.width;
       const by = this.player.y * dim.height;
       ctx.save();
-      ctx.globalCompositeOperation = this.mobilePortrait ? 'source-over' : 'lighter';
+      ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait ? 'source-over' : 'lighter');
       ctx.globalAlpha = (1 - bombProgress) * (this.mobilePortrait ? 0.60 : 0.82);
       ctx.strokeStyle = '#dffcff';
       ctx.shadowBlur = this.vfxGlow(this.mobilePortrait ? 10 : 30);
@@ -2978,7 +3051,7 @@ export class CoreGameplayEngine {
     if (enemy.type === 'miniBoss' && Number(enemy.bossPhase || 1) >= 2 && canDraw(this.images.miniBossPhaseAura)) {
       const auraPulse = this.reducedMotion ? 1 : 1 + Math.sin(this.elapsed * 5.5) * 0.06;
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = state.alpha * 0.52;
       this.ctx.shadowBlur = this.vfxGlow(26);
       this.ctx.shadowColor = '#ff8c57';
@@ -2993,7 +3066,7 @@ export class CoreGameplayEngine {
       const x = state.x * dim.width;
       const y = state.y * dim.height;
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = state.alpha * (phase === 3 ? 0.26 : 0.18);
       this.ctx.strokeStyle = auraColor;
       this.ctx.lineWidth = Math.max(2, dim.min * 0.006);
@@ -3012,7 +3085,7 @@ export class CoreGameplayEngine {
     const allowMotionAfterImages = !this.mobilePortrait || this.adaptiveVfxLevel < 2 || enemy.type === 'charger';
     if (attacking && enemy.trailPoints?.length && allowMotionAfterImages) {
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       enemy.trailPoints.forEach((point, index) => {
         const life = clamp(1 - Number(point.age || 0) / 0.32, 0, 1);
         this.ctx.globalAlpha = life * (enemy.type === 'charger' ? 0.22 : 0.14) * (1 - index * 0.06);
@@ -3025,34 +3098,37 @@ export class CoreGameplayEngine {
 
     if (enemy.type === 'diver' && attacking && canDraw(this.images.diveTrail)) {
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = 0.36 + Math.sin(this.elapsed * 20) * 0.08;
       this.drawSprite(this.images.diveTrail, state.x, state.y - 0.045, dim.enemySize * 1.42, state.rotation);
       this.ctx.restore();
     }
     if (enemy.type === 'charger' && attacking && canDraw(this.images.chargeTrail)) {
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = 0.50 + Math.sin(this.elapsed * 24) * 0.10;
       this.drawSprite(this.images.chargeTrail, state.x, state.y - 0.045, dim.enemySize * 1.58, state.rotation);
       this.ctx.restore();
     }
 
-    // Subtle engine/core glow keeps formation enemies visually alive.
+    // Subtle engine/core glow keeps formation enemies visually alive. Safari
+    // portrait skips this per-enemy/per-frame gradient allocation.
     const px = state.x * dim.width;
     const py = state.y * dim.height;
-    const glowRadius = state.size * (enemy.type === 'elite' ? 0.42 : 0.32);
-    const glow = this.ctx.createRadialGradient(px, py, 0, px, py, glowRadius);
-    glow.addColorStop(0, palette.glow + '88');
-    glow.addColorStop(1, palette.glow + '00');
-    this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
-    this.ctx.globalAlpha = state.alpha * (enemy.mode === 'formation' ? 0.34 : 0.48);
-    this.ctx.fillStyle = glow;
-    this.ctx.beginPath();
-    this.ctx.arc(px, py, glowRadius, 0, Math.PI * 2);
-    this.ctx.fill();
-    this.ctx.restore();
+    if (!this.safariPortrait) {
+      const glowRadius = state.size * (enemy.type === 'elite' ? 0.42 : 0.32);
+      const glow = this.ctx.createRadialGradient(px, py, 0, px, py, glowRadius);
+      glow.addColorStop(0, palette.glow + '88');
+      glow.addColorStop(1, palette.glow + '00');
+      this.ctx.save();
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
+      this.ctx.globalAlpha = state.alpha * (enemy.mode === 'formation' ? 0.34 : 0.48);
+      this.ctx.fillStyle = glow;
+      this.ctx.beginPath();
+      this.ctx.arc(px, py, glowRadius, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.restore();
+    }
 
     if (state.spawnT < 1) this.drawEnemySpawnStreak(enemy, state, dim, palette);
     if (enemy.attackTime < 0 && enemy.mode !== 'formation') this.drawAttackTelegraph(enemy, state, dim, palette);
@@ -3062,13 +3138,13 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = state.alpha;
     this.ctx.shadowBlur = this.vfxGlow(enemy.hitFlashTimer > 0 ? 24 : (enemy.type === 'elite' ? 13 : 8));
     this.ctx.shadowColor = enemy.hitFlashTimer > 0 ? '#ffffff' : palette.glow;
-    if (enemy.hitFlashTimer > 0) this.ctx.globalCompositeOperation = 'lighter';
+    if (enemy.hitFlashTimer > 0) this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.drawSprite(image, state.x, state.y, state.size * (enemy.hitFlashTimer > 0 ? 1.035 : 1), state.rotation);
     this.ctx.restore();
 
     if (enemy.hitFlashTimer > 0) {
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = clamp(enemy.hitFlashTimer / 0.095, 0, 1) * 0.82;
       this.ctx.fillStyle = '#ffffff';
       this.ctx.beginPath();
@@ -3109,7 +3185,7 @@ export class CoreGameplayEngine {
     const y = state.y * dim.height;
     const length = dim.min * (0.12 + (1 - t) * 0.12);
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = (1 - t) * 0.72;
     const gradient = this.ctx.createLinearGradient(x, y - length, x, y + length * 0.15);
     gradient.addColorStop(0, 'rgba(0,0,0,0)');
@@ -3165,7 +3241,7 @@ export class CoreGameplayEngine {
     if (!DANGEROUS_ROUTE_TELEGRAPHS.has(String(attack.kind || ''))) return;
     const samples = attack.kind === 'spiral' ? 20 : 14;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = 0.20 + (1 - remaining) * 0.22;
     this.ctx.strokeStyle = attack.kind === 'charge' ? '#ff6b55' : attack.kind === 'eliteAssault' ? '#ff72da' : palette.glow;
     this.ctx.lineWidth = Math.max(1, dim.min * 0.0022);
@@ -3201,7 +3277,7 @@ export class CoreGameplayEngine {
     this.drawAttackRouteTelegraph(enemy, state, dim, palette, remaining);
 
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = (0.45 + (1 - remaining) * 0.40) * pulse;
     this.ctx.strokeStyle = charge ? '#ff715d' : palette.glow;
     this.ctx.lineWidth = Math.max(1, dim.min * (charge ? 0.0045 : 0.0025));
@@ -3234,7 +3310,7 @@ export class CoreGameplayEngine {
     const y = state.y * dim.height + state.size * 0.22;
     const radius = state.size * (0.07 + progress * 0.12);
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = 0.68 + progress * 0.30;
     this.ctx.shadowBlur = this.vfxGlow(22);
     this.ctx.shadowColor = enemy.type === 'elite' ? '#ff67e2' : '#ffab62';
@@ -3271,7 +3347,7 @@ export class CoreGameplayEngine {
       if (!canDraw(image)) return;
       const size = dim.min * 0.14 * Number(effect.sizeMul || 1) * (0.84 + progress * Number(effect.grow || 0.16));
       this.ctx.save();
-      this.ctx.globalCompositeOperation = effect.additive === false ? 'source-over' : 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite(effect.additive === false ? 'source-over' : 'lighter');
       const pulse = effect.pulse ? (0.78 + Math.sin(progress * Math.PI * 7) * 0.18) : 1;
       this.ctx.globalAlpha = clamp(fade * Number(effect.alphaMul || 1) * pulse, 0, 1);
       this.ctx.shadowBlur = this.vfxGlow(20);
@@ -3284,7 +3360,7 @@ export class CoreGameplayEngine {
     if (effect.kind === 'spark' || effect.kind === 'debris') {
       const radius = Math.max(1, dim.min * (effect.kind === 'debris' ? 0.006 : 0.004) * Number(effect.size || 1) * (1 - progress * 0.35));
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * (effect.kind === 'debris' ? 0.90 : 0.82);
       this.ctx.fillStyle = effect.color || palette.spark;
       this.ctx.shadowBlur = this.vfxGlow(effect.kind === 'debris' ? 10 : 7);
@@ -3317,7 +3393,7 @@ export class CoreGameplayEngine {
       const strength = Number(effect.strength || 1);
       const radius = dim.min * (0.028 + progress * 0.060) * strength;
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = Math.pow(fade, 1.6);
       const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
       gradient.addColorStop(0, '#ffffff');
@@ -3360,7 +3436,7 @@ export class CoreGameplayEngine {
       const strength = Number(effect.strength || 1);
       const radius = dim.min * (effect.kind === 'deathRing' ? 0.025 + progress * 0.105 * strength : 0.018 + progress * 0.055);
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.88;
       this.ctx.strokeStyle = effect.color || palette.burst;
       this.ctx.lineWidth = Math.max(1.2, dim.min * 0.005 * fade);
@@ -3374,7 +3450,7 @@ export class CoreGameplayEngine {
     if (effect.kind === 'eliteCross') {
       const radius = dim.min * (0.025 + progress * 0.10);
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.78;
       this.ctx.strokeStyle = effect.color || '#f05cff';
       this.ctx.lineWidth = Math.max(1.5, dim.min * 0.005 * fade);
@@ -3410,7 +3486,7 @@ export class CoreGameplayEngine {
       const pulse = this.reducedMotion ? 1 : 0.74 + Math.sin(progress * Math.PI * 7) * 0.26;
       const radius = dim.min * (0.028 + progress * 0.022);
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.88 * pulse;
       this.ctx.strokeStyle = '#ff9f67';
       this.ctx.lineWidth = Math.max(1.5, dim.min * 0.0035);
@@ -3430,7 +3506,7 @@ export class CoreGameplayEngine {
     if (effect.kind === 'shotCharge') {
       const radius = dim.min * (0.015 + progress * 0.028);
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.72;
       this.ctx.strokeStyle = palette.glow;
       this.ctx.lineWidth = Math.max(1, dim.min * 0.003);
@@ -3444,7 +3520,7 @@ export class CoreGameplayEngine {
     if (effect.kind === 'enemyMuzzle') {
       const radius = dim.min * ((effect.charged ? 0.034 : 0.022) * (0.7 + Math.sin(progress * Math.PI) * 0.55));
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.90;
       const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
       gradient.addColorStop(0, '#ffffff');
@@ -3461,7 +3537,7 @@ export class CoreGameplayEngine {
     if (effect.kind === 'secondaryBurst') {
       const radius = dim.min * (0.025 + progress * 0.065);
       this.ctx.save();
-      this.ctx.globalCompositeOperation = 'lighter';
+      this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.74;
       const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
       gradient.addColorStop(0, '#ffffff'); gradient.addColorStop(0.25, effect.color || palette.burst); gradient.addColorStop(1, 'rgba(255,130,60,0)');
@@ -3487,7 +3563,7 @@ export class CoreGameplayEngine {
       image = this.images.bomb; size = dim.min * 0.45 * (0.75 + progress * 0.6);
     }
     this.ctx.save();
-    this.ctx.globalCompositeOperation = ['explosion', 'chargeImpact'].includes(effect.kind) ? 'lighter' : 'source-over';
+    this.ctx.globalCompositeOperation = this.vfxComposite(['explosion', 'chargeImpact'].includes(effect.kind) ? 'lighter' : 'source-over');
     this.ctx.globalAlpha = effect.kind === 'warning' ? fade * 0.90 : fade;
     if (effect.kind === 'explosion') {
       this.ctx.shadowBlur = this.vfxGlow(20);
@@ -3518,7 +3594,7 @@ export class CoreGameplayEngine {
       strokeStyle = gradient;
     }
     this.ctx.save();
-    this.ctx.globalCompositeOperation = composite;
+    this.ctx.globalCompositeOperation = this.vfxComposite(composite);
     this.ctx.globalAlpha = alpha * (this.mobilePortrait ? 0.72 : 1);
     this.ctx.strokeStyle = strokeStyle;
     this.ctx.lineWidth = Math.max(1, dim.min * width);
@@ -3550,7 +3626,7 @@ export class CoreGameplayEngine {
       ? Math.atan2(screenVy, screenVx) + Math.PI / 2
       : 0;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite(portraitOverdrive ? 'source-over' : 'lighter');
     this.ctx.shadowBlur = this.vfxGlow(portraitOverdrive ? 6 : (overdrive ? 20 : 12));
     this.ctx.shadowColor = '#6ce9ff';
     this.drawSprite(
@@ -3586,7 +3662,7 @@ export class CoreGameplayEngine {
     const dangerReadabilityScale = dangerous ? 1.06 : 1;
     const sizeScale = Number(spec.scale || 1) * Number(bullet.sizeMul || bullet.scale || 1) * (bullet.charged ? 1.18 : 1) * dangerReadabilityScale;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.shadowBlur = this.vfxGlow(Number(spec.glow || (dangerous ? 18 : 10)));
     this.ctx.shadowColor = color;
     this.drawSprite(
@@ -3603,7 +3679,7 @@ export class CoreGameplayEngine {
     if (!this.thrusterParticles?.length) return;
     const portraitOverdrive = this.mobilePortrait && this.overdriveTimer > 0;
     this.ctx.save();
-    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite(portraitOverdrive ? 'source-over' : 'lighter');
     for (const particle of this.thrusterParticles) {
       const progress = clamp(particle.age / Math.max(0.001, particle.duration), 0, 1);
       const alpha = (1 - progress) * (particle.overdrive ? 0.78 : 0.58);
@@ -3628,7 +3704,7 @@ export class CoreGameplayEngine {
     const portraitOverdrive = this.mobilePortrait && overdrive;
     const engineOffsets = [-0.075, 0.075];
     this.ctx.save();
-    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite(portraitOverdrive ? 'source-over' : 'lighter');
     this.ctx.lineCap = 'round';
     this.ctx.lineJoin = 'round';
     for (const side of engineOffsets) {
@@ -3662,8 +3738,9 @@ export class CoreGameplayEngine {
     const halfWidth = dim.playerSize * (overdrive ? 0.105 : 0.078);
     const tiltShift = (this.playerVfx?.tilt || 0) * dim.playerSize * 0.55;
     const portraitOverdrive = this.mobilePortrait && overdrive;
-    let thrusterFill = 'rgba(96,225,255,.76)';
-    if (!portraitOverdrive) {
+    const liteThruster = this.safariPortrait || portraitOverdrive;
+    let thrusterFill = overdrive ? 'rgba(155,245,255,.82)' : 'rgba(96,225,255,.76)';
+    if (!liteThruster) {
       const gradient = this.ctx.createLinearGradient(x, y, x - tiltShift, y + length);
       gradient.addColorStop(0, 'rgba(245,255,255,.98)');
       gradient.addColorStop(0.24, overdrive ? 'rgba(113,246,255,.92)' : 'rgba(74,214,255,.88)');
@@ -3671,7 +3748,7 @@ export class CoreGameplayEngine {
       thrusterFill = gradient;
     }
     this.ctx.save();
-    this.ctx.globalCompositeOperation = portraitOverdrive ? 'source-over' : 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite(liteThruster ? 'source-over' : 'lighter');
     this.ctx.fillStyle = thrusterFill;
     this.ctx.shadowBlur = this.vfxGlow(portraitOverdrive ? 4 : (overdrive ? 24 : 16));
     this.ctx.shadowColor = '#54dcff';
@@ -3691,7 +3768,7 @@ export class CoreGameplayEngine {
 
     // Overdrive fires more often and from two muzzles. On portrait mobile use a
     // small solid flash instead of allocating four gradients for every shot.
-    if (this.mobilePortrait && overdrive) {
+    if (this.safariPortrait || (this.mobilePortrait && overdrive)) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = 'source-over';
       this.ctx.globalAlpha = timer * 0.78;
@@ -3712,7 +3789,7 @@ export class CoreGameplayEngine {
     }
 
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     for (const offset of anchors) {
       const x = (this.player.x + offset) * dim.width;
       const y = visualY * dim.height - dim.playerSize * 0.37;
@@ -3753,7 +3830,7 @@ export class CoreGameplayEngine {
     const y = Number(this.playerVfx?.hitY ?? this.player.y) * dim.height;
     const radius = dim.playerSize * (0.46 + progress * 0.72);
     this.ctx.save();
-    this.ctx.globalCompositeOperation = 'lighter';
+    this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
     this.ctx.globalAlpha = timer * 0.92;
     this.ctx.strokeStyle = '#ffb59d';
     this.ctx.lineWidth = Math.max(2, dim.min * 0.006 * timer);
