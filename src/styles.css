@@ -4087,3 +4087,55 @@ html.safari-portrait-render .gameplay-screen [data-feedback-layer] * {
   transition: none !important;
   will-change: auto !important;
 }
+
+/* ================================================================
+   PATCH 5 — SAFARI STABLE GAMEPLAY VIEWPORT
+   iOS Safari changes visual viewport height while browser chrome moves.
+   During active portrait gameplay we pin the shell/screen to the pixel size
+   captured by the engine, so 100dvh/fixed-inset recalculation cannot resize the
+   Canvas or force full-screen compositing every toolbar animation frame.
+   ================================================================ */
+html.safari-gameplay-viewport-locked,
+html.safari-gameplay-viewport-locked body,
+html.safari-gameplay-viewport-locked #app {
+  width: var(--safari-game-width) !important;
+  height: var(--safari-game-height) !important;
+  min-width: var(--safari-game-width) !important;
+  min-height: var(--safari-game-height) !important;
+  max-width: var(--safari-game-width) !important;
+  max-height: var(--safari-game-height) !important;
+  overflow: hidden !important;
+}
+
+html.safari-gameplay-viewport-locked .app-shell {
+  inset: auto !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: var(--safari-game-width) !important;
+  height: var(--safari-game-height) !important;
+  min-height: 0 !important;
+}
+
+html.safari-gameplay-viewport-locked .gameplay-screen {
+  inset: auto !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: var(--safari-game-width) !important;
+  height: var(--safari-game-height) !important;
+  min-height: 0 !important;
+  contain: layout paint size;
+}
+
+html.safari-gameplay-viewport-locked .game-canvas {
+  inset: auto !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: var(--safari-game-width) !important;
+  height: var(--safari-game-height) !important;
+}
+
+/* Remove dynamic viewport-unit participation from the active Safari gameplay
+   tree. Other screens retain their existing responsive 100dvh behavior. */
+html.safari-gameplay-viewport-locked .phase7-shell {
+  min-height: 0 !important;
+}

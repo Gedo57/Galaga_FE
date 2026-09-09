@@ -443,8 +443,15 @@ export class CoreGameplayEngine {
     }
     this.patternDirector.lastPattern = String(options.initialState?.lastPattern || '');
 
-    this.boundResize = () => this.resize();
-    this.boundViewportResize = () => this.resize();
+    // Patch 5 — Safari stable viewport. iOS Safari fires resize events while
+    // its browser chrome expands/collapses. Treat height-only toolbar changes as
+    // presentation noise so the Canvas backing store is not reallocated mid-run.
+    this.stableViewportWidth = 0;
+    this.stableViewportHeight = 0;
+    this.stableViewportOrientation = '';
+    this.viewportResizeTimer = 0;
+    this.boundResize = () => this.handleViewportResize('window');
+    this.boundViewportResize = () => this.handleViewportResize('visualViewport');
     this.boundKeyDown = (event) => this.handleKeyDown(event);
     this.boundKeyUp = (event) => this.handleKeyUp(event);
     this.boundPointerDown = (event) => this.handlePointerDown(event);
@@ -575,11 +582,67 @@ export class CoreGameplayEngine {
     this.visualFreezeTimer = Math.max(this.visualFreezeTimer, Math.min(0.12, Math.max(0, Number(duration || 0))));
   }
 
+  currentViewportOrientation() {
+    return window.matchMedia?.('(orientation: portrait)')?.matches ? 'portrait' : 'landscape';
+  }
+
+  currentViewportWidth() {
+    return Math.round(Number(window.visualViewport?.width || window.innerWidth || 0));
+  }
+
+  lockSafariGameplayViewport(rect = this.canvasRect) {
+    if (!this.safariPortrait || !rect) return;
+    const width = Math.max(1, Math.round(Number(rect.width || window.innerWidth || 1)));
+    const height = Math.max(1, Math.round(Number(rect.height || window.innerHeight || 1)));
+    this.stableViewportWidth = width;
+    this.stableViewportHeight = height;
+    this.stableViewportOrientation = this.currentViewportOrientation();
+    const root = document.documentElement;
+    root.style.setProperty('--safari-game-width', `${width}px`);
+    root.style.setProperty('--safari-game-height', `${height}px`);
+    root.classList.add('safari-gameplay-viewport-locked');
+  }
+
+  unlockSafariGameplayViewport() {
+    const root = document.documentElement;
+    root.classList.remove('safari-gameplay-viewport-locked');
+    root.style.removeProperty('--safari-game-width');
+    root.style.removeProperty('--safari-game-height');
+    this.stableViewportWidth = 0;
+    this.stableViewportHeight = 0;
+    this.stableViewportOrientation = '';
+  }
+
+  handleViewportResize(source = 'window') {
+    if (!this.running) return;
+
+    const orientation = this.currentViewportOrientation();
+    const viewportWidth = this.currentViewportWidth();
+    const baselineWidth = Math.max(1, Number(this.stableViewportWidth || this.canvasRect?.width || viewportWidth || 1));
+    const widthDelta = Math.abs(viewportWidth - baselineWidth);
+    const orientationChanged = Boolean(this.stableViewportOrientation && orientation !== this.stableViewportOrientation);
+
+    // On Safari portrait, browser chrome mostly changes viewport HEIGHT. Ignore
+    // those events completely: no getBoundingClientRect(), no CSS mutations and
+    // most importantly no canvas.width/canvas.height reset.
+    if (this.safariPortrait && !orientationChanged && widthDelta < 40) return;
+
+    // visualViewport can emit several intermediate sizes during rotation. Wait
+    // briefly for the real orientation/width to settle, then perform one resize.
+    if (this.viewportResizeTimer) window.clearTimeout(this.viewportResizeTimer);
+    this.viewportResizeTimer = window.setTimeout(() => {
+      this.viewportResizeTimer = 0;
+      if (!this.running) return;
+      this.resize({ force: true, reason: source });
+    }, this.safariMobile ? 180 : 60);
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
-    this.resize();
+    this.resize({ force: true, reason: 'start' });
     this.cacheCanvasRect(true);
+    if (this.safariPortrait) this.lockSafariGameplayViewport(this.canvasRect);
     this.lastRenderSampleTime = 0;
     this.renderFrameEmaMs = this.targetFrameMs;
     this.slowRenderMs = 0;
@@ -621,6 +684,11 @@ export class CoreGameplayEngine {
     this.pendingPointerClientX = null;
     this.pendingPointerId = null;
     this.canvasRect = null;
+    if (this.viewportResizeTimer) {
+      window.clearTimeout(this.viewportResizeTimer);
+      this.viewportResizeTimer = 0;
+    }
+    this.unlockSafariGameplayViewport();
     document.documentElement.classList.remove('safari-portrait-render');
     if (this.bombSnapshotTimer) {
       window.clearTimeout(this.bombSnapshotTimer);
@@ -628,14 +696,31 @@ export class CoreGameplayEngine {
     }
   }
 
-  resize() {
+  resize({ force = false, reason = 'manual' } = {}) {
+    // Patch 5: on Safari portrait the only legitimate mid-run resize is a real
+    // orientation/width change. Height-only toolbar motion is filtered before
+    // reaching this method by handleViewportResize().
+    const previousRect = this.canvasRect;
     const rect = this.cacheCanvasRect(true);
     const wasMobilePortrait = this.mobilePortrait;
     const wasSafariPortrait = this.safariPortrait;
+    const previousOrientation = this.stableViewportOrientation || this.currentViewportOrientation();
     this.mobilePortrait = isPortraitMobile();
     this.safariMobile = isSafariMobile();
     this.safariPortrait = this.safariMobile && this.mobilePortrait;
     document.documentElement.classList.toggle('safari-portrait-render', this.safariPortrait);
+
+    const currentOrientation = this.currentViewportOrientation();
+    const actualWidthChange = !previousRect || Math.abs(Number(rect.width || 0) - Number(previousRect.width || 0)) >= 2;
+    const orientationChanged = currentOrientation !== previousOrientation;
+
+    // If a direct caller reaches resize during Safari toolbar motion, keep the
+    // existing backing store as a second line of defence.
+    if (!force && wasSafariPortrait && this.safariPortrait && !orientationChanged && !actualWidthChange) {
+      this.canvasRect = previousRect || rect;
+      return;
+    }
+
     // Safari portrait renders materially fewer backing-store pixels. CSS size
     // is unchanged, so layout/input coordinates and gameplay remain identical.
     const dprCap = this.safariPortrait ? 1.0 : (this.mobilePortrait ? 1.5 : 2);
@@ -647,6 +732,20 @@ export class CoreGameplayEngine {
       this.canvas.height = height;
     }
     this.dpr = dpr;
+
+    if (this.safariPortrait) {
+      this.lockSafariGameplayViewport(rect);
+    } else if (wasSafariPortrait) {
+      this.unlockSafariGameplayViewport();
+      this.stableViewportOrientation = currentOrientation;
+      this.stableViewportWidth = Math.round(rect.width || window.innerWidth || 0);
+      this.stableViewportHeight = Math.round(rect.height || window.innerHeight || 0);
+    } else {
+      this.stableViewportOrientation = currentOrientation;
+      this.stableViewportWidth = Math.round(rect.width || window.innerWidth || 0);
+      this.stableViewportHeight = Math.round(rect.height || window.innerHeight || 0);
+    }
+
     if (!wasMobilePortrait && this.mobilePortrait && this.ambientParticles?.length > 28) {
       this.ambientParticles = this.ambientParticles.slice(0, 28);
     }

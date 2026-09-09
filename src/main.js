@@ -399,14 +399,36 @@ function escapeHtml(value) {
 }
 function setError(message = '') { model.error = message; render(); }
 function orientation() { return window.matchMedia('(orientation: portrait)').matches ? 'portrait' : 'landscape'; }
-document.documentElement.dataset.orientation = orientation();
-function syncViewportMode() {
-  document.documentElement.dataset.orientation = orientation();
+function isSafariTouchBrowser() {
+  const ua = String(navigator.userAgent || '');
+  const platform = String(navigator.platform || '');
+  const iosDevice = /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return iosDevice && /WebKit/i.test(ua) && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA)/i.test(ua);
+}
+let syncedViewportOrientation = orientation();
+let syncedViewportWidth = Math.round(Number(window.visualViewport?.width || window.innerWidth || 0));
+document.documentElement.dataset.orientation = syncedViewportOrientation;
+function syncViewportMode({ force = false } = {}) {
+  const nextOrientation = orientation();
+  const nextWidth = Math.round(Number(window.visualViewport?.width || window.innerWidth || 0));
+  const gameplayActive = Boolean(document.querySelector('.gameplay-screen'));
+  const safariHeightOnlyResize = isSafariTouchBrowser()
+    && gameplayActive
+    && nextOrientation === syncedViewportOrientation
+    && Math.abs(nextWidth - syncedViewportWidth) < 40;
+
+  // Patch 5: Safari fires window.resize while only its address/bottom bars are
+  // animating. Do not mutate gameplay DOM/layout for those height-only events.
+  if (!force && safariHeightOnlyResize) return;
+
+  syncedViewportOrientation = nextOrientation;
+  syncedViewportWidth = nextWidth;
+  document.documentElement.dataset.orientation = nextOrientation;
   document.documentElement.dataset.compactHeight = window.innerHeight < 560 ? 'true' : 'false';
   syncBombControlLayout();
 }
-syncViewportMode();
-window.addEventListener('resize', syncViewportMode, { passive: true });
+syncViewportMode({ force: true });
+window.addEventListener('resize', () => syncViewportMode(), { passive: true });
 
 function backgrounds(kind = 'mainmenu') {
   return `<img class="screen-bg bg-landscape" src="/assets/${kind}/background-landscape.png" alt="" draggable="false" />
