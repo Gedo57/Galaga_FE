@@ -2334,7 +2334,7 @@ html, body, #app { min-height: 100dvh; }
 
 /* Compact landscape. */
 @media (orientation: landscape) and (max-height: 620px) {
-  .entry-screen .entry-panel { top: 57%; max-height: 76vh; padding: 15px 22px 18px; }
+  .entry-screen .entry-panel { top: 5           7%; max-height: 76vh; padding: 15px 22px 18px; }
   .entry-screen .panel-title { font-size: 28px; }
   .entry-screen .panel-subtitle { margin-bottom: 8px; font-size: 10px; }
   .entry-screen .section-label { margin-top: 7px; }

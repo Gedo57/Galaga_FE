@@ -288,7 +288,7 @@ export class CoreGameplayEngine {
     this.touchMode = isTouchPrimary();
     this.mobilePortrait = isPortraitMobile();
     this.safariMobile = safariMobileHint;
-    this.safariPortrait = this.safariMobile && this.mobilePortrait;
+    this.safariPerformanceMode = this.safariMobile;
     this.targetFrameMs = 1000 / 60;
     this.frameAccumulatorMs = 0;
 
@@ -301,9 +301,9 @@ export class CoreGameplayEngine {
 
     // Presentation-only adaptive VFX. Levels: 0 = Patch-1 quality, 1 = balanced,
     // 2 = low-cost. It never changes simulation speed, collision, fire rate or AI.
-    // Safari portrait starts on the low-cost presentation tier immediately;
+    // Safari touch starts on the low-cost presentation tier immediately;
     // other browsers keep the existing adaptive behavior.
-    this.adaptiveVfxLevel = this.safariPortrait ? 2 : 0;
+    this.adaptiveVfxLevel = this.safariPerformanceMode ? 2 : 0;
     this.renderFrameEmaMs = this.targetFrameMs;
     this.lastRenderSampleTime = 0;
     this.slowRenderMs = 0;
@@ -358,7 +358,7 @@ export class CoreGameplayEngine {
     this.waveStartFxTimer = this.waveElapsed < 1.5 ? 1.25 : 0;
     this.bossLaserFireFlashTimer = 0;
     this.vfxRandom = makeRandom(`${options.seed || options.sessionId || 'phase-8-preview'}:vfx:wave:${this.currentWave}`);
-    this.ambientParticles = Array.from({ length: this.reducedMotion ? 24 : (this.safariPortrait ? 16 : (this.mobilePortrait ? 28 : 58)) }, (_, index) => ({
+    this.ambientParticles = Array.from({ length: this.reducedMotion ? 24 : (this.safariPerformanceMode ? 16 : (this.mobilePortrait ? 28 : 58)) }, (_, index) => ({
       x: this.vfxRandom(), y: this.vfxRandom(), size: 0.35 + this.vfxRandom() * 1.4,
       speed: 0.006 + this.vfxRandom() * 0.018, alpha: 0.16 + this.vfxRandom() * 0.42,
       drift: (this.vfxRandom() - 0.5) * 0.012, layer: index % 3
@@ -456,6 +456,7 @@ export class CoreGameplayEngine {
     this.viewportResizeTimer = 0;
     this.boundResize = () => this.handleViewportResize('window');
     this.boundViewportResize = () => this.handleViewportResize('visualViewport');
+    this.boundOrientationChange = () => this.handleViewportResize('orientationchange');
     this.boundKeyDown = (event) => this.handleKeyDown(event);
     this.boundKeyUp = (event) => this.handleKeyUp(event);
     this.boundPointerDown = (event) => this.handlePointerDown(event);
@@ -464,8 +465,8 @@ export class CoreGameplayEngine {
   }
 
   adaptiveVfxScale() {
+    if (this.safariPerformanceMode) return 0;
     if (!this.mobilePortrait) return 1;
-    if (this.safariPortrait) return 0;
     if (this.adaptiveVfxLevel >= 2) return 0.54;
     if (this.adaptiveVfxLevel === 1) return 0.76;
     return 1;
@@ -475,13 +476,13 @@ export class CoreGameplayEngine {
     const numeric = Math.max(0, Number(value) || 0);
     // shadowBlur is disproportionately expensive on iOS Safari's Canvas 2D
     // compositor. Keep silhouettes/sprites intact and drop only the blur halo.
-    if (this.safariPortrait) return 0;
+    if (this.safariPerformanceMode) return 0;
     return this.mobilePortrait ? numeric * 0.58 * this.adaptiveVfxScale() : numeric;
   }
 
   vfxComposite(mode = 'source-over') {
     // Additive blending can trigger costly offscreen compositing in Safari.
-    return this.safariPortrait && mode === 'lighter' ? 'source-over' : mode;
+    return this.safariPerformanceMode && mode === 'lighter' ? 'source-over' : mode;
   }
 
   cacheCanvasRect(force = false) {
@@ -510,7 +511,7 @@ export class CoreGameplayEngine {
   }
 
   observeRenderPerformance(time) {
-    if (!this.mobilePortrait) {
+    if (!this.mobilePortrait && !this.safariPerformanceMode) {
       this.adaptiveVfxLevel = 0;
       this.lastRenderSampleTime = time;
       this.slowRenderMs = 0;
@@ -521,7 +522,7 @@ export class CoreGameplayEngine {
     // Patch 6: Overdrive keeps the portrait renderer at least on the balanced
     // cosmetic profile for its seven-second lifetime. Simulation stays at full
     // fidelity; only presentation work is reduced.
-    const adaptiveFloor = this.safariPortrait ? 2 : (this.overdriveTimer > 0 ? 1 : 0);
+    const adaptiveFloor = this.safariPerformanceMode ? 2 : (this.overdriveTimer > 0 ? 1 : 0);
     if (this.adaptiveVfxLevel < adaptiveFloor) this.adaptiveVfxLevel = adaptiveFloor;
 
     if (!this.lastRenderSampleTime) {
@@ -559,7 +560,7 @@ export class CoreGameplayEngine {
     // Patch 4: never force Safari into a permanent 30 FPS presentation lock.
     // The low-cost Safari render profile stays active, while frame pacing is
     // handled directly by frame() against real elapsed time.
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.safariStable30 = false;
       this.safariSlowLockMs = 0;
     }
@@ -595,7 +596,7 @@ export class CoreGameplayEngine {
   }
 
   lockSafariGameplayViewport(rect = this.canvasRect) {
-    if (!this.safariPortrait || !rect) return;
+    if (!this.safariPerformanceMode || !rect) return;
     const width = Math.max(1, Math.round(Number(rect.width || window.innerWidth || 1)));
     const height = Math.max(1, Math.round(Number(rect.height || window.innerHeight || 1)));
     this.stableViewportWidth = width;
@@ -626,10 +627,19 @@ export class CoreGameplayEngine {
     const widthDelta = Math.abs(viewportWidth - baselineWidth);
     const orientationChanged = Boolean(this.stableViewportOrientation && orientation !== this.stableViewportOrientation);
 
-    // On Safari portrait, browser chrome mostly changes viewport HEIGHT. Ignore
+    // Safari gameplay is pinned to a stable CSS viewport to stop toolbar-driven
+    // canvas reallocations. Release the OLD lock immediately on a real rotation
+    // so the new landscape/portrait dimensions can settle before we measure them.
+    if (this.safariPerformanceMode && orientationChanged) {
+      this.unlockSafariGameplayViewport();
+      this.canvasRect = null;
+      this.stableViewportOrientation = orientation;
+    }
+
+    // On Safari touch, browser chrome mostly changes viewport HEIGHT. Ignore
     // those events completely: no getBoundingClientRect(), no CSS mutations and
     // most importantly no canvas.width/canvas.height reset.
-    if (this.safariPortrait && !orientationChanged && widthDelta < 40) return;
+    if (this.safariPerformanceMode && !orientationChanged && widthDelta < 40) return;
 
     // visualViewport can emit several intermediate sizes during rotation. Wait
     // briefly for the real orientation/width to settle, then perform one resize.
@@ -646,7 +656,7 @@ export class CoreGameplayEngine {
     this.running = true;
     this.resize({ force: true, reason: 'start' });
     this.cacheCanvasRect(true);
-    if (this.safariPortrait) this.lockSafariGameplayViewport(this.canvasRect);
+    if (this.safariPerformanceMode) this.lockSafariGameplayViewport(this.canvasRect);
     this.lastRenderSampleTime = 0;
     this.renderFrameEmaMs = this.targetFrameMs;
     this.slowRenderMs = 0;
@@ -659,6 +669,7 @@ export class CoreGameplayEngine {
     this.hudFlushClock = 0;
     window.addEventListener('resize', this.boundResize, { passive: true });
     window.visualViewport?.addEventListener('resize', this.boundViewportResize, { passive: true });
+    window.addEventListener('orientationchange', this.boundOrientationChange, { passive: true });
     window.addEventListener('keydown', this.boundKeyDown, { passive: false });
     window.addEventListener('keyup', this.boundKeyUp, { passive: false });
     this.canvas.addEventListener('pointerdown', this.boundPointerDown, { passive: false });
@@ -679,6 +690,7 @@ export class CoreGameplayEngine {
     cancelAnimationFrame(this.raf);
     window.removeEventListener('resize', this.boundResize);
     window.visualViewport?.removeEventListener('resize', this.boundViewportResize);
+    window.removeEventListener('orientationchange', this.boundOrientationChange);
     window.removeEventListener('keydown', this.boundKeyDown);
     window.removeEventListener('keyup', this.boundKeyUp);
     this.canvas.removeEventListener('pointerdown', this.boundPointerDown);
@@ -693,7 +705,7 @@ export class CoreGameplayEngine {
       this.viewportResizeTimer = 0;
     }
     this.unlockSafariGameplayViewport();
-    document.documentElement.classList.remove('safari-portrait-render');
+    document.documentElement.classList.remove('safari-portrait-render', 'safari-gameplay-render');
     if (this.bombSnapshotTimer) {
       window.clearTimeout(this.bombSnapshotTimer);
       this.bombSnapshotTimer = 0;
@@ -701,18 +713,24 @@ export class CoreGameplayEngine {
   }
 
   resize({ force = false, reason = 'manual' } = {}) {
-    // Patch 5: on Safari portrait the only legitimate mid-run resize is a real
+    // Patch 5: on Safari touch the only legitimate mid-run resize is a real
     // orientation/width change. Height-only toolbar motion is filtered before
     // reaching this method by handleViewportResize().
     const previousRect = this.canvasRect;
+    const orientationBeforeMeasure = this.currentViewportOrientation();
+    const previousOrientation = this.stableViewportOrientation || orientationBeforeMeasure;
+    if (this.safariPerformanceMode && this.stableViewportOrientation && orientationBeforeMeasure !== this.stableViewportOrientation) {
+      this.unlockSafariGameplayViewport();
+      this.canvasRect = null;
+    }
     const rect = this.cacheCanvasRect(true);
     const wasMobilePortrait = this.mobilePortrait;
-    const wasSafariPortrait = this.safariPortrait;
-    const previousOrientation = this.stableViewportOrientation || this.currentViewportOrientation();
+    const wasSafariPerformanceMode = this.safariPerformanceMode;
     this.mobilePortrait = isPortraitMobile();
     this.safariMobile = isSafariMobile();
-    this.safariPortrait = this.safariMobile && this.mobilePortrait;
-    document.documentElement.classList.toggle('safari-portrait-render', this.safariPortrait);
+    this.safariPerformanceMode = this.safariMobile;
+    document.documentElement.classList.toggle('safari-portrait-render', this.safariPerformanceMode);
+    document.documentElement.classList.toggle('safari-gameplay-render', this.safariPerformanceMode);
 
     const currentOrientation = this.currentViewportOrientation();
     const actualWidthChange = !previousRect || Math.abs(Number(rect.width || 0) - Number(previousRect.width || 0)) >= 2;
@@ -720,14 +738,14 @@ export class CoreGameplayEngine {
 
     // If a direct caller reaches resize during Safari toolbar motion, keep the
     // existing backing store as a second line of defence.
-    if (!force && wasSafariPortrait && this.safariPortrait && !orientationChanged && !actualWidthChange) {
+    if (!force && wasSafariPerformanceMode && this.safariPerformanceMode && !orientationChanged && !actualWidthChange) {
       this.canvasRect = previousRect || rect;
       return;
     }
 
-    // Safari portrait renders materially fewer backing-store pixels. CSS size
+    // Safari touch renders materially fewer backing-store pixels. CSS size
     // is unchanged, so layout/input coordinates and gameplay remain identical.
-    const dprCap = this.safariPortrait ? 1.0 : (this.mobilePortrait ? 1.5 : 2);
+    const dprCap = this.safariPerformanceMode ? 1.0 : (this.mobilePortrait ? 1.5 : 2);
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
@@ -737,9 +755,9 @@ export class CoreGameplayEngine {
     }
     this.dpr = dpr;
 
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.lockSafariGameplayViewport(rect);
-    } else if (wasSafariPortrait) {
+    } else if (wasSafariPerformanceMode) {
       this.unlockSafariGameplayViewport();
       this.stableViewportOrientation = currentOrientation;
       this.stableViewportWidth = Math.round(rect.width || window.innerWidth || 0);
@@ -753,11 +771,11 @@ export class CoreGameplayEngine {
     if (!wasMobilePortrait && this.mobilePortrait && this.ambientParticles?.length > 28) {
       this.ambientParticles = this.ambientParticles.slice(0, 28);
     }
-    if (this.safariPortrait && this.ambientParticles?.length > 16) {
+    if (this.safariPerformanceMode && this.ambientParticles?.length > 16) {
       this.ambientParticles = this.ambientParticles.slice(0, 16);
     }
-    if (wasMobilePortrait !== this.mobilePortrait || wasSafariPortrait !== this.safariPortrait) {
-      this.adaptiveVfxLevel = this.safariPortrait ? 2 : 0;
+    if (wasMobilePortrait !== this.mobilePortrait || wasSafariPerformanceMode !== this.safariPerformanceMode) {
+      this.adaptiveVfxLevel = this.safariPerformanceMode ? 2 : 0;
       this.renderFrameEmaMs = this.targetFrameMs;
       this.lastRenderSampleTime = 0;
       this.slowRenderMs = 0;
@@ -863,13 +881,13 @@ export class CoreGameplayEngine {
     const rawMs = Math.min(100, Math.max(0, time - this.lastTime));
     this.lastTime = time;
 
-    // Patch 4 — Safari portrait frame pacing.
+    // Patch 4 — Safari touch frame pacing.
     // Do not use the fixed 16.667 ms accumulator here: WebKit rAF timestamps
     // commonly oscillate slightly around the boundary, which caused periodic
     // update/render skips. Instead collect real elapsed time and present at a
     // maximum of ~60 Hz. On 120 Hz displays this naturally consumes two rAF
     // callbacks per game frame; on 60 Hz displays it consumes every callback.
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.safariFrameBufferMs = Math.min(50, Number(this.safariFrameBufferMs || 0) + rawMs);
       const sinceDraw = this.lastDrawTime ? time - this.lastDrawTime : 1000;
       // 14 ms is deliberately below 16.667 ms so normal 60 Hz timestamp jitter
@@ -955,7 +973,7 @@ export class CoreGameplayEngine {
     this.updateBossSpecials(dt);
     this.updateCollisions();
     this.updateEffects(dt);
-    if (this.safariPortrait && this.hudDirty) {
+    if (this.safariPerformanceMode && this.hudDirty) {
       this.hudFlushClock += dt;
       // Four HUD commits per second are visually continuous for score/energy,
       // while avoiding repeated selector/style work in WebKit's hot path.
@@ -1009,8 +1027,8 @@ export class CoreGameplayEngine {
     // Portrait Safari can stall when every destroyed enemy creates a complete
     // layered death stack in the same frame. Keep the exact bomb gameplay but
     // cap presentation work to a predictable budget.
-    this.bombVfxEffectBudget = this.mobilePortrait ? 32 : Number.POSITIVE_INFINITY;
-    this.bombVfxDetailedRemaining = this.mobilePortrait ? 3 : Number.POSITIVE_INFINITY;
+    this.bombVfxEffectBudget = (this.mobilePortrait || this.safariPerformanceMode) ? 32 : Number.POSITIVE_INFINITY;
+    this.bombVfxDetailedRemaining = (this.mobilePortrait || this.safariPerformanceMode) ? 3 : Number.POSITIVE_INFINITY;
     this.effects.push({ x: this.player.x, y: this.player.y - 0.04, age: 0, duration: 0.62, kind: 'bomb' });
     let portraitHitFlashes = 0;
     for (const enemy of [...this.enemies]) {
@@ -1030,7 +1048,7 @@ export class CoreGameplayEngine {
     // fetch callbacks begin on mobile. State is identical; only the flush timing
     // moves by ~120 ms.
     const bombSnapshot = this.snapshot();
-    if (this.mobilePortrait) {
+    if (this.mobilePortrait || this.safariPerformanceMode) {
       if (this.bombSnapshotTimer) window.clearTimeout(this.bombSnapshotTimer);
       this.bombSnapshotTimer = window.setTimeout(() => {
         this.bombSnapshotTimer = 0;
@@ -1668,7 +1686,7 @@ export class CoreGameplayEngine {
     // Patch 4: Patch 3 stopped drawing these histories on Safari, but the old
     // update path still allocated trail/particle objects and replacement arrays
     // every frame. Stop that hidden GC pressure at the source.
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       if (vfx.trailPoints.length) vfx.trailPoints.length = 0;
       if (this.thrusterParticles.length) this.thrusterParticles.length = 0;
       vfx.trailClock = 0;
@@ -2040,8 +2058,8 @@ export class CoreGameplayEngine {
 
       this.updateAttackEnemy(enemy, dt);
       const attacking = Number(enemy.attackTime || 0) >= 0;
-      if (this.safariPortrait) {
-        // Patch 4: trails are not rendered in Safari portrait, so do not create,
+      if (this.safariPerformanceMode) {
+        // Patch 4: trails are not rendered in Safari touch, so do not create,
         // age, filter or slice their backing arrays on the hot update path.
         if (enemy.trailPoints?.length) enemy.trailPoints.length = 0;
         enemy.trailClock = 0;
@@ -2189,11 +2207,11 @@ export class CoreGameplayEngine {
       bullet.age = Number(bullet.age || 0) + dt;
       bullet.x += bullet.vx * dt;
       bullet.y += bullet.vy * dt;
-      if (this.safariPortrait) {
+      if (this.safariPerformanceMode) {
         if (bullet.y > -0.08 && bullet.x > -0.08 && bullet.x < 1.08) this.playerBullets[write++] = bullet;
       }
     }
-    if (this.safariPortrait) this.playerBullets.length = write;
+    if (this.safariPerformanceMode) this.playerBullets.length = write;
     else this.playerBullets = this.playerBullets.filter((bullet) => bullet.y > -0.08 && bullet.x > -0.08 && bullet.x < 1.08);
   }
 
@@ -2204,11 +2222,11 @@ export class CoreGameplayEngine {
       bullet.age = Number(bullet.age || 0) + dt;
       bullet.x += bullet.vx * dt;
       bullet.y += bullet.vy * dt;
-      if (this.safariPortrait) {
+      if (this.safariPerformanceMode) {
         if (bullet.y < 1.08 && bullet.y > -0.1 && bullet.x > -0.12 && bullet.x < 1.12) this.enemyBullets[write++] = bullet;
       }
     }
-    if (this.safariPortrait) this.enemyBullets.length = write;
+    if (this.safariPerformanceMode) this.enemyBullets.length = write;
     else this.enemyBullets = this.enemyBullets.filter((bullet) => bullet.y < 1.08 && bullet.y > -0.1 && bullet.x > -0.12 && bullet.x < 1.12);
   }
 
@@ -2557,7 +2575,7 @@ export class CoreGameplayEngine {
     const hitX = Number(impact?.x ?? enemy.x);
     const hitY = Number(impact?.y ?? enemy.y);
     this.effects.push({ x: hitX, y: hitY, age: 0, duration: 0.16, kind: 'hit', enemyType: enemy.type });
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       if (enemy.hp <= 0) this.killEnemy(enemy);
       else {
         this.emitAudio('enemy-hit', { enemyType: enemy.type, hp: enemy.hp, maxHp: enemy.maxHp });
@@ -2573,7 +2591,7 @@ export class CoreGameplayEngine {
     const incomingVy = Number(impact?.vy || -1);
     const incomingMag = Math.hypot(incomingVx, incomingVy) || 1;
     const reverseAngle = Math.atan2(-incomingVy / incomingMag, -incomingVx / incomingMag);
-    const sparkCount = this.safariPortrait ? 2 : (this.reducedMotion ? 4 : 7);
+    const sparkCount = this.safariPerformanceMode ? 2 : (this.reducedMotion ? 4 : 7);
     for (let i = 0; i < sparkCount; i += 1) {
       const fan = (this.random() - 0.5) * 1.10;
       const angle = reverseAngle + fan;
@@ -2613,7 +2631,7 @@ export class CoreGameplayEngine {
     this.comboTimer = this.comboWindow;
     this.addOverdriveEnergy(4);
     this.spawnEnemyDeathVfx(enemy);
-    if (!this.safariPortrait) {
+    if (!this.safariPerformanceMode) {
       this.effects.push({ x: enemy.x, y: enemy.y - 0.025, age: 0, duration: 0.72, kind: 'scoreText', text: `+${award.toLocaleString()}`, color: '#effcff' });
       if (dangerKill) this.effects.push({ x: enemy.x, y: enemy.y + 0.012, age: 0, duration: 0.68, kind: 'riskText', text: 'RISK +25%', color: '#ffbf79' });
       if (nextCombo > previousCombo) this.effects.push({ x: enemy.x, y: enemy.y + 0.035, age: 0, duration: 0.82, kind: 'comboText', text: `COMBO x${nextCombo}`, color: '#7ff2ff' });
@@ -2665,7 +2683,7 @@ export class CoreGameplayEngine {
       }
       return;
     }
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       const duration = boss ? 0.52 : heavy ? 0.34 : 0.24;
       this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration, kind: 'explosion', enemyType: enemy.type, color: palette.burst, bomb });
       if (boss || heavy) this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: duration * 0.68, kind: 'deathRing', enemyType: enemy.type, color: palette.burst, strength: boss ? 1.2 : 0.9 });
@@ -2751,11 +2769,11 @@ export class CoreGameplayEngine {
       if (Number.isFinite(effect.vx)) effect.x += effect.vx * dt;
       if (Number.isFinite(effect.vy)) effect.y += effect.vy * dt;
       if (effect.kind === 'debris') effect.vy += 0.10 * dt;
-      if (this.safariPortrait) {
+      if (this.safariPerformanceMode) {
         if (effect.age < effect.duration) this.effects[write++] = effect;
       }
     }
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.effects.length = write;
       if (this.effects.length > 24) this.effects.splice(0, this.effects.length - 24);
     } else {
@@ -2806,7 +2824,7 @@ export class CoreGameplayEngine {
   }
 
   emitHud(force = false) {
-    if (this.safariPortrait && this.running && !force) {
+    if (this.safariPerformanceMode && this.running && !force) {
       this.hudDirty = true;
       return;
     }
@@ -2820,7 +2838,7 @@ export class CoreGameplayEngine {
   }
 
   drawAmbientSpace(dim) {
-    if (this.safariPortrait || !this.ambientParticles?.length) return;
+    if (this.safariPerformanceMode || !this.ambientParticles?.length) return;
     const { ctx } = this;
     ctx.save();
     ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait && this.adaptiveVfxLevel >= 2 ? 'source-over' : 'lighter');
@@ -2881,7 +2899,7 @@ export class CoreGameplayEngine {
     const x = boss.x * dim.width;
     const y = boss.y * dim.height;
     this.ctx.save();
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.ctx.globalAlpha = life * (boss.type === 'finalBoss' ? 0.18 : 0.12);
       this.ctx.fillStyle = boss.type === 'finalBoss' ? '#4a1008' : '#382006';
       this.ctx.fillRect(0, 0, dim.width, dim.height);
@@ -2942,7 +2960,7 @@ export class CoreGameplayEngine {
   }
 
   drawWaveStartSweep(dim) {
-    if (this.safariPortrait || this.waveStartFxTimer <= 0) return;
+    if (this.safariPerformanceMode || this.waveStartFxTimer <= 0) return;
     const progress = 1 - clamp(this.waveStartFxTimer / 1.25, 0, 1);
     const fade = Math.sin(clamp(progress, 0, 1) * Math.PI);
     const y = dim.height * (0.14 + progress * 0.72);
@@ -2974,7 +2992,7 @@ export class CoreGameplayEngine {
   }
 
   drawOverdriveField(dim) {
-    if (this.safariPortrait) return;
+    if (this.safariPerformanceMode) return;
     if (this.overdriveTimer <= 0 || this.player.lives <= 0) return;
     const remaining = clamp(this.overdriveTimer / 7, 0, 1);
     const entrance = clamp((7 - this.overdriveTimer) / 0.35, 0, 1);
@@ -3025,7 +3043,7 @@ export class CoreGameplayEngine {
     const laneHalf = this.bossLaser.width * dim.width;
     const top = dim.height * 0.08;
     const bottom = dim.height * 0.94;
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.ctx.save();
       if (this.bossLaser.telegraph > 0) {
         const duration = Math.max(0.01, Number(this.bossLaser.telegraphDuration || this.bossLaser.telegraph));
@@ -3271,7 +3289,7 @@ export class CoreGameplayEngine {
     const idlePulse = this.reducedMotion ? 1 : 1 + Math.sin(this.elapsed * (enemy.type === 'heavy' ? 3.2 : 4.4) + Number(enemy.idleSeed || 0)) * (boss ? 0.018 : 0.026);
     const settle = spawnT < 1 ? 0.76 + spawnEase * 0.24 + Math.sin(spawnT * Math.PI) * 0.08 : 1;
     const alpha = spawnT < 0.05 ? 0 : clamp(spawnT * 1.8, 0, 1);
-    const idleRoll = enemy.mode === 'formation' && !this.reducedMotion && !this.safariPortrait
+    const idleRoll = enemy.mode === 'formation' && !this.reducedMotion && !this.safariPerformanceMode
       ? Math.sin(this.elapsed * 1.7 + Number(enemy.idleSeed || 0)) * (enemy.type === 'heavy' ? 0.018 : 0.035)
       : 0;
     return { x, y, size: dim.enemySize * spec.size * idlePulse * settle, alpha, rotation: Number(enemy.rotation ?? Math.PI) + idleRoll, spawnT };
@@ -3318,7 +3336,7 @@ export class CoreGameplayEngine {
     }
 
     // Motion after-images make dives/charges readable without adding new art assets.
-    const allowMotionAfterImages = !this.safariPortrait && (!this.mobilePortrait || this.adaptiveVfxLevel < 2 || enemy.type === 'charger');
+    const allowMotionAfterImages = !this.safariPerformanceMode && (!this.mobilePortrait || this.adaptiveVfxLevel < 2 || enemy.type === 'charger');
     if (attacking && enemy.trailPoints?.length && allowMotionAfterImages) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
@@ -3332,14 +3350,14 @@ export class CoreGameplayEngine {
       this.ctx.restore();
     }
 
-    if (!this.safariPortrait && enemy.type === 'diver' && attacking && canDraw(this.images.diveTrail)) {
+    if (!this.safariPerformanceMode && enemy.type === 'diver' && attacking && canDraw(this.images.diveTrail)) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = 0.36 + Math.sin(this.elapsed * 20) * 0.08;
       this.drawSprite(this.images.diveTrail, state.x, state.y - 0.045, dim.enemySize * 1.42, state.rotation);
       this.ctx.restore();
     }
-    if (!this.safariPortrait && enemy.type === 'charger' && attacking && canDraw(this.images.chargeTrail)) {
+    if (!this.safariPerformanceMode && enemy.type === 'charger' && attacking && canDraw(this.images.chargeTrail)) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = 0.50 + Math.sin(this.elapsed * 24) * 0.10;
@@ -3351,7 +3369,7 @@ export class CoreGameplayEngine {
     // portrait skips this per-enemy/per-frame gradient allocation.
     const px = state.x * dim.width;
     const py = state.y * dim.height;
-    if (!this.safariPortrait) {
+    if (!this.safariPerformanceMode) {
       const glowRadius = state.size * (enemy.type === 'elite' ? 0.42 : 0.32);
       const glow = this.ctx.createRadialGradient(px, py, 0, px, py, glowRadius);
       glow.addColorStop(0, palette.glow + '88');
@@ -3416,7 +3434,7 @@ export class CoreGameplayEngine {
   }
 
   drawEnemySpawnStreak(enemy, state, dim, palette) {
-    if (this.safariPortrait) return;
+    if (this.safariPerformanceMode) return;
     const t = state.spawnT;
     const x = state.x * dim.width;
     const y = state.y * dim.height;
@@ -3474,7 +3492,7 @@ export class CoreGameplayEngine {
   }
 
   drawAttackRouteTelegraph(enemy, state, dim, palette, remaining) {
-    if (this.safariPortrait) return;
+    if (this.safariPerformanceMode) return;
     const attack = enemy.attack || {};
     if (!DANGEROUS_ROUTE_TELEGRAPHS.has(String(attack.kind || ''))) return;
     const samples = attack.kind === 'spiral' ? 20 : 14;
@@ -3512,7 +3530,7 @@ export class CoreGameplayEngine {
     const targetY = Number(attack.targetY ?? this.player.y) * dim.height;
     const charge = attack.kind === 'charge';
 
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       // Gameplay-critical warning stays visible, but WebKit avoids dashed lines,
       // animated dash offsets and multi-pass route drawing.
       this.ctx.save();
@@ -3573,7 +3591,7 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = 0.68 + progress * 0.30;
     this.ctx.shadowBlur = this.vfxGlow(22);
     this.ctx.shadowColor = enemy.type === 'elite' ? '#ff67e2' : '#ffab62';
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.ctx.fillStyle = enemy.type === 'elite' ? '#ff92ec' : '#ffd092';
       this.ctx.globalAlpha = 0.52 + progress * 0.26;
     } else {
@@ -3606,7 +3624,7 @@ export class CoreGameplayEngine {
     const x = Number(effect.x || 0) * dim.width;
     const y = Number(effect.y || 0) * dim.height;
 
-    if (this.safariPortrait && ['energyCloud', 'secondaryBurst', 'coreFlash'].includes(effect.kind)) return;
+    if (this.safariPerformanceMode && ['energyCloud', 'secondaryBurst', 'coreFlash'].includes(effect.kind)) return;
 
     if (effect.kind === 'spriteEffect') {
       const image = this.images[effect.spriteKey];
@@ -3788,7 +3806,7 @@ export class CoreGameplayEngine {
       this.ctx.save();
       this.ctx.globalCompositeOperation = this.vfxComposite('lighter');
       this.ctx.globalAlpha = fade * 0.90;
-      if (this.safariPortrait) {
+      if (this.safariPerformanceMode) {
         // Enemy fire starts ~0.75 s into a wave. Avoid allocating a fresh radial
         // gradient for every muzzle frame at the exact point Safari used to drop.
         this.ctx.fillStyle = effect.charged ? '#ffd08f' : palette.spark;
@@ -3884,7 +3902,7 @@ export class CoreGameplayEngine {
     const overdrive = bullet.sprite === 'playerBulletOverdrive';
     const portraitOverdrive = this.mobilePortrait && overdrive;
     const pulse = 1 + Math.sin(Number(bullet.age || 0) * 34) * (this.reducedMotion ? 0.015 : 0.04);
-    if (!this.safariPortrait) this.drawProjectileTrail(bullet, dim, {
+    if (!this.safariPerformanceMode) this.drawProjectileTrail(bullet, dim, {
       color: overdrive ? '#b6ffff' : '#66dcff',
       length: portraitOverdrive ? 0.052 : (overdrive ? 0.082 : 0.060),
       width: portraitOverdrive ? 0.008 : (overdrive ? 0.012 : 0.009),
@@ -3917,7 +3935,7 @@ export class CoreGameplayEngine {
     const spec = PROJECTILE_VFX[sprite] || {};
     const color = bullet.trailColor || spec.color || (dangerous ? '#ffb36a' : '#ff704f');
     const pulse = 1 + Math.sin(Number(bullet.age || 0) * 28) * (this.reducedMotion ? 0.01 : (dangerous ? 0.05 : 0.025));
-    if (!this.safariPortrait && (!this.mobilePortrait || dangerous)) {
+    if (!this.safariPerformanceMode && (!this.mobilePortrait || dangerous)) {
       this.drawProjectileTrail(bullet, dim, {
         color,
         length: Number(spec.length || (dangerous ? 0.080 : 0.052)),
@@ -3948,7 +3966,7 @@ export class CoreGameplayEngine {
   }
 
   drawThrusterParticles(dim) {
-    if (this.safariPortrait || !this.thrusterParticles?.length) return;
+    if (this.safariPerformanceMode || !this.thrusterParticles?.length) return;
     const portraitOverdrive = this.mobilePortrait && this.overdriveTimer > 0;
     this.ctx.save();
     this.ctx.globalCompositeOperation = this.vfxComposite(portraitOverdrive ? 'source-over' : 'lighter');
@@ -3970,7 +3988,7 @@ export class CoreGameplayEngine {
   }
 
   drawPlayerMotionTrail(dim, visualY) {
-    if (this.safariPortrait) return;
+    if (this.safariPerformanceMode) return;
     const points = this.playerVfx?.trailPoints || [];
     if (points.length < 2) return;
     const overdrive = this.overdriveTimer > 0;
@@ -4011,7 +4029,7 @@ export class CoreGameplayEngine {
     const halfWidth = dim.playerSize * (overdrive ? 0.105 : 0.078);
     const tiltShift = (this.playerVfx?.tilt || 0) * dim.playerSize * 0.55;
     const portraitOverdrive = this.mobilePortrait && overdrive;
-    const liteThruster = this.safariPortrait || portraitOverdrive;
+    const liteThruster = this.safariPerformanceMode || portraitOverdrive;
     let thrusterFill = overdrive ? 'rgba(155,245,255,.82)' : 'rgba(96,225,255,.76)';
     if (!liteThruster) {
       const gradient = this.ctx.createLinearGradient(x, y, x - tiltShift, y + length);
@@ -4041,7 +4059,7 @@ export class CoreGameplayEngine {
 
     // Overdrive fires more often and from two muzzles. On portrait mobile use a
     // small solid flash instead of allocating four gradients for every shot.
-    if (this.safariPortrait || (this.mobilePortrait && overdrive)) {
+    if (this.safariPerformanceMode || (this.mobilePortrait && overdrive)) {
       this.ctx.save();
       this.ctx.globalCompositeOperation = 'source-over';
       this.ctx.globalAlpha = timer * 0.78;
@@ -4133,7 +4151,7 @@ export class CoreGameplayEngine {
         : Math.max(dim.height * 0.132, 104);
     const ratio = clamp(Number(boss.hp || 0) / Math.max(1, Number(boss.maxHp || 1)), 0, 1);
     const final = boss.type === 'finalBoss';
-    if (this.safariPortrait) {
+    if (this.safariPerformanceMode) {
       this.ctx.save();
       this.ctx.globalAlpha = 0.96;
       this.ctx.fillStyle = 'rgba(1, 8, 22, .92)';
@@ -4210,7 +4228,7 @@ export class CoreGameplayEngine {
   }
 
   drawPatternBanner(label, dim) {
-    if (this.safariPortrait) return;
+    if (this.safariPerformanceMode) return;
     const alpha = clamp(this.patternBanner.timer / 0.35, 0, 1);
     const text = String(label || 'PATTERN').toUpperCase();
     this.ctx.save();
@@ -4226,7 +4244,7 @@ export class CoreGameplayEngine {
   }
 
   safariHalfTurnSprite(image) {
-    if (!this.safariPortrait || !canDraw(image)) return null;
+    if (!this.safariPerformanceMode || !canDraw(image)) return null;
     const cached = this.safariHalfTurnSpriteCache.get(image);
     if (cached) return cached;
 
@@ -4260,7 +4278,7 @@ export class CoreGameplayEngine {
 
     // Most formation enemies sit at exactly PI. Safari can draw the cached
     // half-turn image directly instead of rebuilding a transform stack 60x/sec.
-    if (this.safariPortrait && Math.abs(Math.abs(rotation) - Math.PI) < 0.00001) {
+    if (this.safariPerformanceMode && Math.abs(Math.abs(rotation) - Math.PI) < 0.00001) {
       const cached = this.safariHalfTurnSprite(image);
       if (cached) {
         this.ctx.drawImage(cached, x - sizePx / 2, y - sizePx / 2, sizePx, sizePx);
