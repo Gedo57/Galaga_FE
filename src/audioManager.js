@@ -20,11 +20,21 @@ const SFX_TRACKS = Object.freeze({
 
 const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
 
+function isSafariBrowser() {
+  const ua = String(navigator.userAgent || '');
+  const vendor = String(navigator.vendor || '');
+  return /Apple/i.test(vendor) && /WebKit/i.test(ua) && /Safari/i.test(ua)
+    && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA|Chrome|Chromium|Edg|OPR|Firefox)/i.test(ua);
+}
 function isSafariTouchDevice() {
   const ua = String(navigator.userAgent || '');
   const platform = String(navigator.platform || '');
   const iosDevice = /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  return iosDevice && /WebKit/i.test(ua) && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA)/i.test(ua);
+  return isSafariBrowser() && iosDevice;
+}
+function isSafariDesktopDevice() {
+  if (!isSafariBrowser() || isSafariTouchDevice()) return false;
+  return /Macintosh|Mac OS X/i.test(String(navigator.userAgent || '')) || /^Mac/i.test(String(navigator.platform || ''));
 }
 
 function loadSettings() {
@@ -48,6 +58,8 @@ class AudioManager {
     // WebKit has a much higher cost for many simultaneous HTMLAudio decoders.
     // Keep a bounded pool profile on touch Safari; Chrome/desktop behavior stays unchanged.
     this.safariTouch = isSafariTouchDevice();
+    this.safariDesktop = isSafariDesktopDevice();
+    this.safariOptimized = this.safariTouch || this.safariDesktop;
     this.music = Object.fromEntries(Object.entries(MUSIC_TRACKS).map(([key, src]) => {
       const node = new Audio(src);
       node.loop = true;
@@ -163,6 +175,16 @@ class AudioManager {
       this.getPool('bombBlast', 2);
       return;
     }
+    if (this.safariDesktop) {
+      this.getPool('laser', 5);
+      this.getPool('enemyFire', 4);
+      this.getPool('enemyDestroy', 4);
+      this.getPool('explosion', 3);
+      this.getPool('waveStart', 1);
+      this.getPool('waveClear', 1);
+      this.getPool('bombBlast', 2);
+      return;
+    }
     this.getPool('laser', 8);
     this.getPool('enemyFire', 7);
     this.getPool('enemyDestroy', 6);
@@ -184,12 +206,15 @@ class AudioManager {
     if (this.safariTouch) {
       const safariPoolCaps = { laser: 3, enemyFire: 3, enemyDestroy: 3, explosion: 2, chargeUp: 2, diveFlyby: 2, bombBlast: 2, waveStart: 1, waveClear: 1 };
       requestedPoolSize = Math.min(requestedPoolSize, Number(safariPoolCaps[key] || 2));
+    } else if (this.safariDesktop) {
+      const safariDesktopPoolCaps = { laser: 5, enemyFire: 4, enemyDestroy: 4, explosion: 3, chargeUp: 2, diveFlyby: 3, bombBlast: 2, waveStart: 1, waveClear: 1 };
+      requestedPoolSize = Math.min(requestedPoolSize, Number(safariDesktopPoolCaps[key] || 3));
     }
     const pool = this.getPool(key, requestedPoolSize);
     if (!pool?.nodes?.length) return false;
 
     let node = pool.nodes[pool.cursor % pool.nodes.length];
-    if (this.safariTouch) {
+    if (this.safariOptimized) {
       // Prefer an idle voice. If all voices are busy, drop this cosmetic sound
       // rather than pause/seek an active HTMLAudio element, which is a known
       // sustained-combat hotspot in WebKit.

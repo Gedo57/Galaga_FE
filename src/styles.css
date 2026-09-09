@@ -2334,7 +2334,7 @@ html, body, #app { min-height: 100dvh; }
 
 /* Compact landscape. */
 @media (orientation: landscape) and (max-height: 620px) {
-  .entry-screen .entry-panel { top: 5           7%; max-height: 76vh; padding: 15px 22px 18px; }
+  .entry-screen .entry-panel { top: 57%; max-height: 76vh; padding: 15px 22px 18px; }
   .entry-screen .panel-title { font-size: 28px; }
   .entry-screen .panel-subtitle { margin-bottom: 8px; font-size: 10px; }
   .entry-screen .section-label { margin-top: 7px; }
@@ -4138,4 +4138,46 @@ html.safari-gameplay-viewport-locked .game-canvas {
    tree. Other screens retain their existing responsive 100dvh behavior. */
 html.safari-gameplay-viewport-locked .phase7-shell {
   min-height: 0 !important;
+}
+
+
+/* =========================================================
+   PATCH 8 — SAFARI DESKTOP PERFORMANCE PROFILE
+   Mac Safari keeps desktop layout/viewport behavior, but drops the expensive
+   full-screen WebKit compositor layers and GPU-heavy filters during gameplay.
+   ========================================================= */
+html.safari-desktop-render .gameplay-screen::after,
+html.safari-desktop-render .gameplay-screen .combat-vignette,
+html.safari-desktop-render .gameplay-screen .speed-lines {
+  display: none !important;
+  animation: none !important;
+}
+
+html.safari-desktop-render .gameplay-screen,
+html.safari-desktop-render .gameplay-screen *,
+html.safari-desktop-render .gameplay-screen *::before,
+html.safari-desktop-render .gameplay-screen *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html.safari-desktop-render .gameplay-screen .game-canvas {
+  filter: none !important;
+  box-shadow: none !important;
+  will-change: auto !important;
+}
+
+html.safari-desktop-render .gameplay-screen .gameplay-hud,
+html.safari-desktop-render .gameplay-screen .core-stats-panel,
+html.safari-desktop-render .gameplay-screen .ability-panel,
+html.safari-desktop-render .gameplay-screen .multiplier-chip,
+html.safari-desktop-render .gameplay-screen [data-feedback-layer] > * {
+  filter: none !important;
+  -webkit-filter: none !important;
+  will-change: auto !important;
+}
+
+html.safari-desktop-render .gameplay-screen .screen-bg {
+  animation: none !important;
+  will-change: auto !important;
 }

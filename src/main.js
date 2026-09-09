@@ -88,20 +88,24 @@ function closeAudioSettings() {
 function handleAudioEvent(event = {}) {
   const type = String(event.type || '');
   if (type === 'player-fire') {
-    audioManager.playSfx('laser', { volume: event.overdrive ? 0.30 : 0.24, rate: event.overdrive ? 1.18 : 1.06, poolSize: isSafariTouchBrowser() ? 3 : 8 });
+    audioManager.playSfx('laser', { volume: event.overdrive ? 0.30 : 0.24, rate: event.overdrive ? 1.18 : 1.06, poolSize: isSafariTouchBrowser() ? 3 : (isSafariDesktopBrowser() ? 5 : 8) });
   } else if (type === 'enemy-fire') {
-    audioManager.playSfx('enemyFire', { volume: 0.22, rate: 1, throttleMs: isSafariTouchBrowser() ? 100 : 70, poolSize: isSafariTouchBrowser() ? 3 : 7 });
+    audioManager.playSfx('enemyFire', { volume: 0.22, rate: 1, throttleMs: isSafariTouchBrowser() ? 100 : (isSafariDesktopBrowser() ? 85 : 70), poolSize: isSafariTouchBrowser() ? 3 : (isSafariDesktopBrowser() ? 4 : 7) });
   } else if (type === 'enemy-destroyed') {
     const enemyType = String(event.enemyType || '');
     const bossLike = ['miniBoss', 'finalBoss'].includes(enemyType);
     if (bossLike) audioManager.playSfx('explosion', { volume: 0.72, rate: 0.86, poolSize: 3 });
-    else audioManager.playSfx('enemyDestroy', { volume: 0.18, rate: enemyType === 'heavy' || enemyType === 'elite' ? 0.92 : 1.04, throttleMs: 75, poolSize: 6 });
+    else audioManager.playSfx('enemyDestroy', { volume: 0.18, rate: enemyType === 'heavy' || enemyType === 'elite' ? 0.92 : 1.04, throttleMs: isSafariDesktopBrowser() ? 90 : 75, poolSize: isSafariTouchBrowser() ? 3 : (isSafariDesktopBrowser() ? 4 : 6) });
   } else if (type === 'boss-laser-telegraph') {
-    screen.classList.remove('laser-warning-live'); void screen.offsetWidth; screen.classList.add('laser-warning-live');
-    window.setTimeout(() => screen.classList.remove('laser-warning-live'), Math.max(650, Number(event.telegraph || 1) * 1000));
+    if (!isSafariGameplayPerformanceMode()) {
+      screen.classList.remove('laser-warning-live'); void screen.offsetWidth; screen.classList.add('laser-warning-live');
+      window.setTimeout(() => screen.classList.remove('laser-warning-live'), Math.max(650, Number(event.telegraph || 1) * 1000));
+    }
   } else if (type === 'boss-laser-fire') {
-    screen.classList.remove('laser-fire-live'); void screen.offsetWidth; screen.classList.add('laser-fire-live');
-    window.setTimeout(() => screen.classList.remove('laser-fire-live'), 260);
+    if (!isSafariGameplayPerformanceMode()) {
+      screen.classList.remove('laser-fire-live'); void screen.offsetWidth; screen.classList.add('laser-fire-live');
+      window.setTimeout(() => screen.classList.remove('laser-fire-live'), 260);
+    }
   } else if (type === 'player-hit') {
     if (Number(event.lives || 0) <= 0) audioManager.playSfx('explosion', { volume: 0.82, rate: 0.92, poolSize: 3 });
   } else if (type === 'dive-flyby') {
@@ -399,11 +403,22 @@ function escapeHtml(value) {
 }
 function setError(message = '') { model.error = message; render(); }
 function orientation() { return window.matchMedia('(orientation: portrait)').matches ? 'portrait' : 'landscape'; }
+function isSafariBrowser() {
+  const ua = String(navigator.userAgent || '');
+  const vendor = String(navigator.vendor || '');
+  return /Apple/i.test(vendor) && /WebKit/i.test(ua) && /Safari/i.test(ua)
+    && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA|Chrome|Chromium|Edg|OPR|Firefox)/i.test(ua);
+}
 function isSafariTouchBrowser() {
   const ua = String(navigator.userAgent || '');
   const platform = String(navigator.platform || '');
   const iosDevice = /iPad|iPhone|iPod/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  return iosDevice && /WebKit/i.test(ua) && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA)/i.test(ua);
+  return isSafariBrowser() && iosDevice;
+}
+function isSafariDesktopBrowser() {
+  if (!isSafariBrowser() || isSafariTouchBrowser()) return false;
+  const ua = String(navigator.userAgent || '');
+  return /Macintosh|Mac OS X/i.test(ua) || /^Mac/i.test(String(navigator.platform || ''));
 }
 let syncedViewportOrientation = orientation();
 let syncedViewportWidth = Math.round(Number(window.visualViewport?.width || window.innerWidth || 0));
@@ -519,12 +534,18 @@ function emitFeedback(text, tone = 'score', options = {}) {
 function isSafariPortraitPerformanceMode() {
   return document.documentElement.classList.contains('safari-portrait-render');
 }
+function isSafariDesktopPerformanceMode() {
+  return document.documentElement.classList.contains('safari-desktop-render');
+}
+function isSafariGameplayPerformanceMode() {
+  return isSafariPortraitPerformanceMode() || isSafariDesktopPerformanceMode();
+}
 function pulseHud(selector, className = 'hud-pop', duration = 420) {
   const node = app.querySelector(selector);
   if (!node) return;
   // Patch 4: offsetWidth animation restarts force synchronous layout. Safari
   // portrait keeps the HUD values but skips these cosmetic reflow pulses.
-  if (isSafariPortraitPerformanceMode()) {
+  if (isSafariGameplayPerformanceMode()) {
     node.classList.remove(className);
     return;
   }
@@ -619,7 +640,7 @@ function applyPolishFeedback(snapshot = {}) {
   const nextLives = Number(snapshot.lives ?? visualTelemetry.lives);
   const nextBossPhase = Number(snapshot.finalBossPhase ?? 0);
   const nextOverdrive = Number(snapshot.overdriveActiveRemaining || 0) > 0;
-  if (isSafariPortraitPerformanceMode()) {
+  if (isSafariGameplayPerformanceMode()) {
     const nextWave = Number(snapshot.wave ?? model.wave ?? visualTelemetry.wave);
     const nextTier = bestUnlockedTier(nextWave, nextScore).multiplier;
     visualTelemetry.score = nextScore; visualTelemetry.damageTaken = nextDamage; visualTelemetry.lives = nextLives;
