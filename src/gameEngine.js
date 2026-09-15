@@ -243,6 +243,12 @@ function isSafariBrowser() {
   return !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA|Chrome|Chromium|Edg|OPR|Firefox)/i.test(ua);
 }
 
+function isIPadOSDevice() {
+  const ua = String(navigator.userAgent || '');
+  const platform = String(navigator.platform || '');
+  return /iPad/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
 function isSafariMobile() {
   const ua = String(navigator.userAgent || '');
   const platform = String(navigator.platform || '');
@@ -283,7 +289,15 @@ export class CoreGameplayEngine {
     this.canvas = canvas;
     const safariMobileHint = isSafariMobile();
     const safariDesktopHint = isSafariDesktop();
-    this.ctx = canvas.getContext('2d', { alpha: true, desynchronized: safariMobileHint || safariDesktopHint });
+    // Patch 2 — iPad Safari opaque gameplay surface. The gameplay background is
+    // drawn into the canvas as the first pass, so WebKit no longer composites a
+    // full-screen transparent canvas over a separate full-screen DOM image on
+    // every frame. Keep the existing transparent path everywhere else.
+    this.safariOpaqueCanvas = safariMobileHint && isIPadOSDevice();
+    this.ctx = canvas.getContext('2d', { alpha: !this.safariOpaqueCanvas, desynchronized: safariMobileHint || safariDesktopHint });
+    this.safariGameplayBackground = null;
+    this.safariGameplayBackgroundPortrait = null;
+    this.safariBackgroundGeometry = null;
     this.difficulty = options.difficulty || 'medium';
     this.tuning = TUNING[this.difficulty] || TUNING.medium;
     this.onHud = options.onHud || (() => {});
@@ -308,6 +322,7 @@ export class CoreGameplayEngine {
     this.safariOptimizedMode = this.safariPerformanceMode || this.safariDesktopPerformanceMode;
     this.targetFrameMs = 1000 / 60;
     this.frameAccumulatorMs = 0;
+    this.renderScale = 1;
 
     // Patch 2 — mobile input + adaptive presentation budget. Pointer events only
     // enqueue the latest X coordinate; gameplay consumes it once per rendered frame.
@@ -332,10 +347,14 @@ export class CoreGameplayEngine {
     this.safariStable30 = false;
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
-    // Patch 4 — Safari uses a real-time 60 Hz presentation buffer instead of
-    // the old one-way 30 FPS fallback. This absorbs 120 Hz rAF callbacks and
-    // small WebKit timestamp jitter without skipping visible 60 Hz frames.
+    // Patch 3 — Safari refresh-aware frame pacing. Standard 60 Hz iPads render
+    // every rAF callback. ProMotion/high-refresh Safari is detected from repeated
+    // sub-12.5 ms callbacks, then presentation is capped near 60 Hz without using
+    // a fixed sinceDraw threshold that can create periodic 30–33 ms hitches.
     this.safariFrameBufferMs = 0;
+    this.safariHighRefreshHits = 0;
+    this.safariHighRefreshMode = false;
+    this.safariFrameToleranceMs = 2.5;
     this.hudDirty = false;
     this.hudFlushClock = 0;
     // Patch 7 — sustained Safari combat profile. The cache stores a small
@@ -684,6 +703,8 @@ export class CoreGameplayEngine {
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
     this.safariFrameBufferMs = 0;
+    this.safariHighRefreshHits = 0;
+    this.safariHighRefreshMode = false;
     this.hudDirty = false;
     this.hudFlushClock = 0;
     window.addEventListener('resize', this.boundResize, { passive: true });
@@ -724,7 +745,7 @@ export class CoreGameplayEngine {
       this.viewportResizeTimer = 0;
     }
     this.unlockSafariGameplayViewport();
-    document.documentElement.classList.remove('safari-portrait-render', 'safari-gameplay-render', 'safari-desktop-render');
+    document.documentElement.classList.remove('safari-portrait-render', 'safari-gameplay-render', 'safari-desktop-render', 'safari-ipad-opaque-canvas');
     if (this.bombSnapshotTimer) {
       window.clearTimeout(this.bombSnapshotTimer);
       this.bombSnapshotTimer = 0;
@@ -755,6 +776,7 @@ export class CoreGameplayEngine {
     document.documentElement.classList.toggle('safari-portrait-render', this.safariPerformanceMode);
     document.documentElement.classList.toggle('safari-gameplay-render', this.safariOptimizedMode);
     document.documentElement.classList.toggle('safari-desktop-render', this.safariDesktopPerformanceMode);
+    document.documentElement.classList.toggle('safari-ipad-opaque-canvas', this.safariOpaqueCanvas && this.safariPerformanceMode);
 
     const currentOrientation = this.currentViewportOrientation();
     const actualWidthChange = !previousRect || Math.abs(Number(rect.width || 0) - Number(previousRect.width || 0)) >= 2;
@@ -767,17 +789,37 @@ export class CoreGameplayEngine {
       return;
     }
 
-    // Safari touch renders materially fewer backing-store pixels. CSS size
-    // is unchanged, so layout/input coordinates and gameplay remain identical.
+    // Patch 1 — iPad Safari canvas pixel budget. Safari touch already caps
+    // DPR at 1, but large iPads can still push well over one million backing
+    // pixels every frame. Keep the CSS canvas/input space unchanged and only
+    // lower the backing store on iPadOS. Gameplay uses normalized coordinates,
+    // so movement, collision, fire rate and difficulty are unaffected.
     const dprCap = this.safariPerformanceMode ? 1.0 : (this.safariDesktopPerformanceMode ? 1.5 : (this.mobilePortrait ? 1.5 : 2));
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-    const width = Math.max(1, Math.round(rect.width * dpr));
-    const height = Math.max(1, Math.round(rect.height * dpr));
+    const iPadSafari = this.safariPerformanceMode && isIPadOSDevice();
+    const ipadBaseRenderScale = 0.90;
+    const ipadMaxRenderPixels = 800000;
+    const ipadMinRenderScale = 0.72;
+
+    let renderScale = iPadSafari ? ipadBaseRenderScale : 1;
+    if (iPadSafari) {
+      const scaledPixels = Math.max(1, rect.width * dpr * renderScale)
+        * Math.max(1, rect.height * dpr * renderScale);
+      if (scaledPixels > ipadMaxRenderPixels) {
+        renderScale *= Math.sqrt(ipadMaxRenderPixels / scaledPixels);
+      }
+      renderScale = clamp(renderScale, ipadMinRenderScale, 1);
+    }
+
+    const width = Math.max(1, Math.round(rect.width * dpr * renderScale));
+    const height = Math.max(1, Math.round(rect.height * dpr * renderScale));
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;
+      this.safariBackgroundGeometry = null;
     }
-    this.dpr = dpr;
+    this.dpr = dpr * renderScale;
+    this.renderScale = renderScale;
 
     if (this.safariPerformanceMode) {
       this.lockSafariGameplayViewport(rect);
@@ -812,6 +854,8 @@ export class CoreGameplayEngine {
       this.safariSlowLockMs = 0;
       this.lastDrawTime = 0;
       this.safariFrameBufferMs = 0;
+      this.safariHighRefreshHits = 0;
+      this.safariHighRefreshMode = false;
       this.hudDirty = false;
       this.hudFlushClock = 0;
     }
@@ -909,18 +953,23 @@ export class CoreGameplayEngine {
     const rawMs = Math.min(100, Math.max(0, time - this.lastTime));
     this.lastTime = time;
 
-    // Patch 4 — Safari touch frame pacing.
-    // Do not use the fixed 16.667 ms accumulator here: WebKit rAF timestamps
-    // commonly oscillate slightly around the boundary, which caused periodic
-    // update/render skips. Instead collect real elapsed time and present at a
-    // maximum of ~60 Hz. On 120 Hz displays this naturally consumes two rAF
-    // callbacks per game frame; on 60 Hz displays it consumes every callback.
+    // Patch 3 — Safari 60/120 Hz frame pacing.
+    // The previous fixed `sinceDraw < 14` gate could skip a whole 60 Hz frame
+    // when WebKit delivered a slightly early callback. Detect high-refresh rAF
+    // instead: normal 60 Hz Safari renders every callback, while repeated ~8 ms
+    // callbacks (iPad ProMotion) are paired into one ~60 Hz presentation frame.
     if (this.safariOptimizedMode) {
       this.safariFrameBufferMs = Math.min(50, Number(this.safariFrameBufferMs || 0) + rawMs);
-      const sinceDraw = this.lastDrawTime ? time - this.lastDrawTime : 1000;
-      // 14 ms is deliberately below 16.667 ms so normal 60 Hz timestamp jitter
-      // never drops a visible frame, while 120 Hz callbacks are still capped.
-      if (sinceDraw < 14) {
+
+      if (rawMs > 0 && rawMs < 12.5) {
+        this.safariHighRefreshHits = Math.min(6, Number(this.safariHighRefreshHits || 0) + 1);
+      } else {
+        this.safariHighRefreshHits = Math.max(0, Number(this.safariHighRefreshHits || 0) - 2);
+      }
+      this.safariHighRefreshMode = this.safariHighRefreshHits >= 2;
+
+      const toleranceMs = Number(this.safariFrameToleranceMs || 2.5);
+      if (this.safariHighRefreshMode && this.safariFrameBufferMs + toleranceMs < this.targetFrameMs) {
         this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
         return;
       }
@@ -928,11 +977,9 @@ export class CoreGameplayEngine {
       this.flushPointerInput();
       const frameMs = Math.min(34, Math.max(1, this.safariFrameBufferMs));
       this.safariFrameBufferMs = 0;
-      // Patch 7 — do one real-time simulation pass per presented Safari frame.
-      // The previous >22 ms split doubled all array scans/collision/pattern work
-      // exactly when WebKit was already late. A 22–34 ms dt is already supported
-      // by the desktop path, so keeping one pass preserves real elapsed gameplay
-      // time without creating a self-reinforcing low-FPS workload.
+      // One real-time simulation pass per presented frame. This keeps gameplay
+      // elapsed time correct without multiplying collision/pattern scans when
+      // Safari is already late.
       const dt = frameMs / 1000;
       this.elapsed += dt;
       this.update(dt);
@@ -3207,10 +3254,71 @@ export class CoreGameplayEngine {
     this.ctx.restore();
   }
 
+  safariBackgroundForCurrentOrientation() {
+    if (!this.safariOpaqueCanvas) return null;
+    const portrait = this.canvas.height >= this.canvas.width;
+    if (this.safariGameplayBackground && this.safariGameplayBackgroundPortrait === portrait) {
+      return this.safariGameplayBackground;
+    }
+    const screen = this.canvas.closest?.('.gameplay-screen');
+    const selector = portrait ? '.screen-bg.bg-portrait' : '.screen-bg.bg-landscape';
+    const image = screen?.querySelector?.(selector) || null;
+    this.safariGameplayBackground = image;
+    this.safariGameplayBackgroundPortrait = portrait;
+    return image;
+  }
+
+  drawSafariOpaqueBackground(dim) {
+    if (!this.safariOpaqueCanvas) return false;
+    const image = this.safariBackgroundForCurrentOrientation();
+    const ctx = this.ctx;
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+
+    if (!canDraw(image)) {
+      // Never leave an alpha-disabled backing store undefined while the image is
+      // still decoding. The normal gameplay background is near-black, so this
+      // fallback is visually safe for the first frame only.
+      ctx.fillStyle = '#020611';
+      ctx.fillRect(0, 0, dim.width, dim.height);
+      return true;
+    }
+
+    // Match CSS object-fit: cover without resizing/reflowing a DOM background.
+    // Cache the crop rectangle so the hot draw loop only performs one image blit.
+    const sourceW = Math.max(1, Number(image.naturalWidth || image.width || 1));
+    const sourceH = Math.max(1, Number(image.naturalHeight || image.height || 1));
+    const geometryKey = `${sourceW}x${sourceH}:${dim.width}x${dim.height}`;
+    let geometry = this.safariBackgroundGeometry;
+    if (!geometry || geometry.key !== geometryKey) {
+      const sourceAspect = sourceW / sourceH;
+      const targetAspect = dim.width / Math.max(1, dim.height);
+      let sx = 0;
+      let sy = 0;
+      let sw = sourceW;
+      let sh = sourceH;
+
+      if (sourceAspect > targetAspect) {
+        sw = sourceH * targetAspect;
+        sx = (sourceW - sw) * 0.5;
+      } else if (sourceAspect < targetAspect) {
+        sh = sourceW / targetAspect;
+        sy = (sourceH - sh) * 0.5;
+      }
+      geometry = { key: geometryKey, sx, sy, sw, sh };
+      this.safariBackgroundGeometry = geometry;
+    }
+
+    ctx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, dim.width, dim.height);
+    return true;
+  }
+
   draw() {
     const { ctx } = this;
     const dim = this.dimensions();
-    ctx.clearRect(0, 0, dim.width, dim.height);
+    if (!this.drawSafariOpaqueBackground(dim)) {
+      ctx.clearRect(0, 0, dim.width, dim.height);
+    }
     ctx.save();
     if (this.visualShake.timer > 0 && this.visualShake.strength > 0 && !this.reducedMotion) {
       const falloff = clamp(this.visualShake.timer / Math.max(0.001, this.visualShake.duration), 0, 1);
