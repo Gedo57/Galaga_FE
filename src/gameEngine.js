@@ -377,14 +377,10 @@ export class CoreGameplayEngine {
     this.safariStable30 = false;
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
-    // Patch 3 — Safari refresh-aware frame pacing. Standard 60 Hz iPads render
-    // every rAF callback. ProMotion/high-refresh Safari is detected from repeated
-    // sub-12.5 ms callbacks, then presentation is capped near 60 Hz without using
-    // a fixed sinceDraw threshold that can create periodic 30–33 ms hitches.
+    // Stability Patch 3: independent presentation credit and simulation time.
+    // Keep fractional presentation credit instead of resetting it at every draw.
     this.safariFrameBufferMs = 0;
-    this.safariHighRefreshHits = 0;
-    this.safariHighRefreshMode = false;
-    this.safariFrameToleranceMs = 2.5;
+    this.safariRenderCreditMs = 0;
     // Opt-in diagnosis only: ?perf=1 exposes achieved FPS and JS work, not GPU timing.
     this.perfDebug = this.safariOptimizedMode && new URLSearchParams(window.location.search).get('perf') === '1';
     this.perfOverlay = null;
@@ -527,6 +523,14 @@ export class CoreGameplayEngine {
     this.boundResize = () => this.handleViewportResize('window');
     this.boundViewportResize = () => this.handleViewportResize('visualViewport');
     this.boundOrientationChange = () => this.handleViewportResize('orientationchange');
+    this.boundVisibilityChange = () => {
+      if (!this.safariOptimizedMode) return;
+      // Background time is not combat time. Do not catch it up on tab resume.
+      this.lastTime = performance.now();
+      this.safariFrameBufferMs = 0;
+      this.safariRenderCreditMs = 0;
+      this.lastRenderSampleTime = 0;
+    };
     this.boundKeyDown = (event) => this.handleKeyDown(event);
     this.boundKeyUp = (event) => this.handleKeyUp(event);
     this.boundPointerDown = (event) => this.handlePointerDown(event);
@@ -738,8 +742,7 @@ export class CoreGameplayEngine {
     this.safariSlowLockMs = 0;
     this.lastDrawTime = 0;
     this.safariFrameBufferMs = 0;
-    this.safariHighRefreshHits = 0;
-    this.safariHighRefreshMode = false;
+    this.safariRenderCreditMs = 0;
     this.hudDirty = false;
     this.hudFlushClock = 0;
     if (this.perfDebug && !this.perfOverlay) {
@@ -754,6 +757,7 @@ export class CoreGameplayEngine {
     window.addEventListener('resize', this.boundResize, { passive: true });
     window.visualViewport?.addEventListener('resize', this.boundViewportResize, { passive: true });
     window.addEventListener('orientationchange', this.boundOrientationChange, { passive: true });
+    document.addEventListener('visibilitychange', this.boundVisibilityChange);
     window.addEventListener('keydown', this.boundKeyDown, { passive: false });
     window.addEventListener('keyup', this.boundKeyUp, { passive: false });
     this.canvas.addEventListener('pointerdown', this.boundPointerDown, { passive: false });
@@ -777,6 +781,7 @@ export class CoreGameplayEngine {
     window.removeEventListener('resize', this.boundResize);
     window.visualViewport?.removeEventListener('resize', this.boundViewportResize);
     window.removeEventListener('orientationchange', this.boundOrientationChange);
+    document.removeEventListener('visibilitychange', this.boundVisibilityChange);
     window.removeEventListener('keydown', this.boundKeyDown);
     window.removeEventListener('keyup', this.boundKeyUp);
     this.canvas.removeEventListener('pointerdown', this.boundPointerDown);
@@ -884,8 +889,7 @@ export class CoreGameplayEngine {
       this.safariSlowLockMs = 0;
       this.lastDrawTime = 0;
       this.safariFrameBufferMs = 0;
-      this.safariHighRefreshHits = 0;
-      this.safariHighRefreshMode = false;
+      this.safariRenderCreditMs = 0;
       this.hudDirty = false;
       this.hudFlushClock = 0;
     }
@@ -995,7 +999,7 @@ export class CoreGameplayEngine {
     const averageUpdate = sample.updateMs / Math.max(1, sample.frames);
     const averageDraw = sample.drawMs / Math.max(1, sample.frames);
     const fps = sample.frames * 1000 / interval;
-    this.perfOverlay.textContent = `Wave ${this.currentWave} | FPS ${fps.toFixed(1)} | enemies ${this.enemies.filter((enemy) => enemy.alive).length} | bullets ${this.playerBullets.length + this.enemyBullets.length} | VFX ${this.effects.length} | JS update ${averageUpdate.toFixed(1)}ms | JS draw ${averageDraw.toFixed(1)}ms | worst JS ${sample.worstMs.toFixed(1)}ms | ${this.canvas.width}×${this.canvas.height} | ${this.safariHighRefreshMode ? '120Hz' : '60Hz/auto'}`;
+    this.perfOverlay.textContent = `Wave ${this.currentWave} | FPS ${fps.toFixed(1)} | enemies ${this.enemies.filter((enemy) => enemy.alive).length} | bullets ${this.playerBullets.length + this.enemyBullets.length} | VFX ${this.effects.length} | JS update ${averageUpdate.toFixed(1)}ms | JS draw ${averageDraw.toFixed(1)}ms | worst JS ${sample.worstMs.toFixed(1)}ms | ${this.canvas.width}×${this.canvas.height} | 60 FPS target`;
     this.perfSamples = { startedAt: now, frames: 0, updateMs: 0, drawMs: 0, worstMs: 0 };
   }
 
@@ -1004,37 +1008,43 @@ export class CoreGameplayEngine {
     const rawMs = Math.min(100, Math.max(0, time - this.lastTime));
     this.lastTime = time;
 
-    // Patch 3 — Safari 60/120 Hz frame pacing.
-    // The previous fixed `sinceDraw < 14` gate could skip a whole 60 Hz frame
-    // when WebKit delivered a slightly early callback. Detect high-refresh rAF
-    // instead: normal 60 Hz Safari renders every callback, while repeated ~8 ms
-    // callbacks (iPad ProMotion) are paired into one ~60 Hz presentation frame.
+    // Stability Patch 3 — pace presentation with retained fractional credit.
+    // This works at 60/90/100/120 Hz without toggling refresh-rate guesses.
     if (this.safariOptimizedMode) {
-      this.safariFrameBufferMs = Math.min(50, Number(this.safariFrameBufferMs || 0) + rawMs);
-
-      if (rawMs > 0 && rawMs < 12.5) {
-        this.safariHighRefreshHits = Math.min(6, Number(this.safariHighRefreshHits || 0) + 1);
-      } else {
-        this.safariHighRefreshHits = Math.max(0, Number(this.safariHighRefreshHits || 0) - 2);
-      }
-      this.safariHighRefreshMode = this.safariHighRefreshHits >= 2;
-
-      const toleranceMs = Number(this.safariFrameToleranceMs || 2.5);
-      if (this.safariHighRefreshMode && this.safariFrameBufferMs + toleranceMs < this.targetFrameMs) {
+      if (document.hidden) {
+        this.safariFrameBufferMs = 0;
+        this.safariRenderCreditMs = 0;
         this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
         return;
       }
-
-      this.flushPointerInput();
-      const frameMs = Math.min(34, Math.max(1, this.safariFrameBufferMs));
+      const targetMs = this.targetFrameMs;
+      const toleranceMs = 1;
+      this.safariRenderCreditMs += rawMs;
+      this.safariFrameBufferMs = Math.min(100, this.safariFrameBufferMs + rawMs);
+      if (this.safariRenderCreditMs + toleranceMs < targetMs) {
+        this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
+        return;
+      }
+      // Consume missed presentation slots, retaining only the fractional phase.
+      // A slightly early callback may borrow up to 1 ms, repaid next frame.
+      const slots = Math.max(1, Math.floor((this.safariRenderCreditMs + toleranceMs) / targetMs));
+      this.safariRenderCreditMs -= slots * targetMs;
+      const frameMs = this.safariFrameBufferMs;
       this.safariFrameBufferMs = 0;
-      // One real-time simulation pass per presented frame. This keeps gameplay
-      // elapsed time correct without multiplying collision/pattern scans when
-      // Safari is already late.
-      const dt = frameMs / 1000;
-      this.elapsed += dt;
+      this.flushPointerInput();
       const perfStart = this.perfDebug ? performance.now() : 0;
-      this.update(dt);
+      // Preserve up to 100 ms of foreground elapsed time, split into <=34 ms
+      // collision steps. At most three updates prevent unbounded catch-up work.
+      // The existing 100 ms stall cap intentionally remains for long freezes.
+      const steps = Math.max(1, Math.ceil(frameMs / 34));
+      const dt = frameMs / steps / 1000;
+      for (let step = 0; step < steps; step += 1) {
+        this.elapsed += dt;
+        this.update(dt);
+        // A wave-clear callback can synchronously detach this engine.
+        if (!this.running) return;
+        if (this.player.lives <= 0) break;
+      }
       const perfAfterUpdate = this.perfDebug ? performance.now() : 0;
       this.draw();
       if (this.perfDebug) {
@@ -1043,7 +1053,7 @@ export class CoreGameplayEngine {
       }
       this.lastDrawTime = time;
       this.observeRenderPerformance(time);
-      this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
+      if (this.running) this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
       return;
     }
 
