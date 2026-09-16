@@ -148,15 +148,20 @@ function routePathForState(state) {
   if (GAMEPLAY_ROUTE_STATES.has(state)) return ROUTE_PATHS.gameplay;
   return ROUTE_PATHS.menu;
 }
+// Keep the opt-in performance meter available when the SPA changes routes.
+// Other query parameters retain the original routing behavior.
+function perfRouteSuffix() {
+  return new URLSearchParams(window.location.search).get('perf') === '1' ? '?perf=1' : '';
+}
 function syncRouteToState(state, { replace = false } = {}) {
   const target = routePathForState(state);
   if (normalizedPathname() === target) return;
-  window.history[replace ? 'replaceState' : 'pushState']({ galagaRoute: true }, '', target);
+  window.history[replace ? 'replaceState' : 'pushState']({ galagaRoute: true }, '', target + perfRouteSuffix());
 }
 function normalizeInitialRoute() {
   const kind = routeKindFromLocation();
   if (kind === 'unknown' || normalizedPathname() === '/') {
-    window.history.replaceState({ galagaRoute: true }, '', ROUTE_PATHS.menu);
+    window.history.replaceState({ galagaRoute: true }, '', ROUTE_PATHS.menu + perfRouteSuffix());
     return 'menu';
   }
   return kind;
@@ -1351,7 +1356,7 @@ window.addEventListener('popstate', () => {
     machine.set(GameState.MENU, { force: true });
     return;
   }
-  window.history.replaceState({ galagaRoute: true }, '', ROUTE_PATHS.menu);
+  window.history.replaceState({ galagaRoute: true }, '', ROUTE_PATHS.menu + perfRouteSuffix());
   machine.set(GameState.MENU, { force: true });
 });
 

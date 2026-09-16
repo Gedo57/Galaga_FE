@@ -4183,19 +4183,35 @@ html.safari-desktop-render .gameplay-screen .screen-bg {
 }
 
 /* =========================================================
-   IPAD SAFARI PATCH 2 — OPAQUE GAMEPLAY COMPOSITING
-   The engine paints the gameplay background into an alpha-disabled canvas on
-   iPad Safari. Remove the duplicate full-screen DOM background only while that
-   path is active, reducing WebKit's per-frame full-screen blending/compositing.
-   Gameplay/HUD layout and all non-iPad browsers are unchanged.
+   SAFARI ALL-DEVICE — OPAQUE GAMEPLAY COMPOSITING
+   Paint the gameplay background into the alpha-disabled canvas on iPhone,
+   iPad and Mac Safari. Hide only the duplicate DOM background during gameplay;
+   menus and non-Safari browsers keep their original rendering behavior.
    ========================================================= */
-html.safari-ipad-opaque-canvas .gameplay-screen > .screen-bg {
+html.safari-opaque-canvas .gameplay-screen > .screen-bg {
   display: none !important;
 }
-
-html.safari-ipad-opaque-canvas .gameplay-screen .game-canvas {
+html.safari-opaque-canvas .gameplay-screen .game-canvas {
   opacity: 1 !important;
+  filter: none !important;
+  -webkit-filter: none !important;
   mix-blend-mode: normal !important;
-  isolation: auto !important;
+  box-shadow: none !important;
+  will-change: auto !important;
   background: #020611;
+}
+/* Off by default. Activate via ?perf=1 when profiling a real device. */
+.gameplay-screen .safari-perf-diagnostics {
+  position: absolute;
+  z-index: 9999;
+  left: 8px;
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  max-width: min(95%, 520px);
+  padding: 5px 7px;
+  background: rgba(0, 0, 0, .86);
+  color: #caffcc;
+  font: 11px/1.35 ui-monospace, monospace;
+  white-space: normal;
+  pointer-events: none;
+  contain: layout paint;
 }

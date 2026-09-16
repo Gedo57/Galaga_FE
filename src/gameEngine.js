@@ -284,20 +284,46 @@ function makeRandom(seedValue) {
   };
 }
 
+// Cross-device Safari presentation limits. Only the backing-store resolution
+// changes; the CSS viewport, normalized positions, hitboxes and game clock do not.
+// Exported so the iPhone/iPad/Mac profiles can be regression-tested without a DOM.
+export function canvasBackingPlan({ cssWidth, cssHeight, deviceDpr = 1, safariMobile = false,
+  safariDesktop = false, ipad = false, mobilePortrait = false } = {}) {
+  const width = Math.max(1, Number(cssWidth) || 1);
+  const height = Math.max(1, Number(cssHeight) || 1);
+  const nativeDpr = Math.max(1, Number(deviceDpr) || 1);
+  const safari = safariMobile || safariDesktop;
+  const dprCap = safariMobile ? 1 : safariDesktop ? 1.25 : mobilePortrait ? 1.5 : 2;
+  const cappedDpr = Math.min(nativeDpr, dprCap);
+  if (!safari) {
+    return { width: Math.max(1, Math.round(width * cappedDpr)),
+      height: Math.max(1, Math.round(height * cappedDpr)),
+      dpr: cappedDpr, renderScale: 1, pixelBudget: null };
+  }
+  // iPad and iPhone must not inherit desktop Retina rendering. Large MacBook
+  // canvases also need a HARD pixel ceiling, not only an independent DPR cap.
+  const pixelBudget = safariDesktop ? 1100000 : ipad ? 720000 : 440000;
+  const baseDpr = safariMobile && ipad ? cappedDpr * 0.90 : cappedDpr;
+  const effectiveDpr = Math.min(baseDpr, Math.sqrt(pixelBudget / (width * height)));
+  return { width: Math.max(1, Math.floor(width * effectiveDpr)),
+    height: Math.max(1, Math.floor(height * effectiveDpr)),
+    dpr: effectiveDpr, renderScale: effectiveDpr / cappedDpr, pixelBudget };
+}
+
 export class CoreGameplayEngine {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
     const safariMobileHint = isSafariMobile();
     const safariDesktopHint = isSafariDesktop();
-    // Patch 2 — iPad Safari opaque gameplay surface. The gameplay background is
-    // drawn into the canvas as the first pass, so WebKit no longer composites a
-    // full-screen transparent canvas over a separate full-screen DOM image on
-    // every frame. Keep the existing transparent path everywhere else.
-    this.safariOpaqueCanvas = safariMobileHint && isIPadOSDevice();
+    // One opaque gameplay surface on Safari for iPhone, iPad and MacBook.
+    // The canvas itself paints the existing background; other browsers retain
+    // their prior transparent canvas and CSS background behavior.
+    this.safariOpaqueCanvas = safariMobileHint || safariDesktopHint;
     this.ctx = canvas.getContext('2d', { alpha: !this.safariOpaqueCanvas, desynchronized: safariMobileHint || safariDesktopHint });
     this.safariGameplayBackground = null;
     this.safariGameplayBackgroundPortrait = null;
     this.safariBackgroundGeometry = null;
+    this.safariBackgroundSurface = null;
     this.difficulty = options.difficulty || 'medium';
     this.tuning = TUNING[this.difficulty] || TUNING.medium;
     this.onHud = options.onHud || (() => {});
@@ -355,6 +381,10 @@ export class CoreGameplayEngine {
     this.safariHighRefreshHits = 0;
     this.safariHighRefreshMode = false;
     this.safariFrameToleranceMs = 2.5;
+    // Opt-in diagnosis only: ?perf=1 exposes achieved FPS and JS work, not GPU timing.
+    this.perfDebug = this.safariOptimizedMode && new URLSearchParams(window.location.search).get('perf') === '1';
+    this.perfOverlay = null;
+    this.perfSamples = { startedAt: 0, frames: 0, updateMs: 0, drawMs: 0, worstMs: 0 };
     this.hudDirty = false;
     this.hudFlushClock = 0;
     // Patch 7 — sustained Safari combat profile. The cache stores a small
@@ -707,6 +737,15 @@ export class CoreGameplayEngine {
     this.safariHighRefreshMode = false;
     this.hudDirty = false;
     this.hudFlushClock = 0;
+    if (this.perfDebug && !this.perfOverlay) {
+      const overlay = document.createElement('output');
+      overlay.className = 'safari-perf-diagnostics';
+      overlay.setAttribute('aria-label', 'Safari performance diagnostics');
+      overlay.textContent = 'Measuring FPS…';
+      (this.canvas.closest('.gameplay-screen') || this.canvas.parentElement).appendChild(overlay);
+      this.perfOverlay = overlay;
+    }
+    this.perfSamples = { startedAt: 0, frames: 0, updateMs: 0, drawMs: 0, worstMs: 0 };
     window.addEventListener('resize', this.boundResize, { passive: true });
     window.visualViewport?.addEventListener('resize', this.boundViewportResize, { passive: true });
     window.addEventListener('orientationchange', this.boundOrientationChange, { passive: true });
@@ -728,6 +767,8 @@ export class CoreGameplayEngine {
     if (!this.running) return;
     this.running = false;
     cancelAnimationFrame(this.raf);
+    this.perfOverlay?.remove();
+    this.perfOverlay = null;
     window.removeEventListener('resize', this.boundResize);
     window.visualViewport?.removeEventListener('resize', this.boundViewportResize);
     window.removeEventListener('orientationchange', this.boundOrientationChange);
@@ -745,7 +786,7 @@ export class CoreGameplayEngine {
       this.viewportResizeTimer = 0;
     }
     this.unlockSafariGameplayViewport();
-    document.documentElement.classList.remove('safari-portrait-render', 'safari-gameplay-render', 'safari-desktop-render', 'safari-ipad-opaque-canvas');
+    document.documentElement.classList.remove('safari-portrait-render', 'safari-gameplay-render', 'safari-desktop-render', 'safari-opaque-canvas');
     if (this.bombSnapshotTimer) {
       window.clearTimeout(this.bombSnapshotTimer);
       this.bombSnapshotTimer = 0;
@@ -776,7 +817,7 @@ export class CoreGameplayEngine {
     document.documentElement.classList.toggle('safari-portrait-render', this.safariPerformanceMode);
     document.documentElement.classList.toggle('safari-gameplay-render', this.safariOptimizedMode);
     document.documentElement.classList.toggle('safari-desktop-render', this.safariDesktopPerformanceMode);
-    document.documentElement.classList.toggle('safari-ipad-opaque-canvas', this.safariOpaqueCanvas && this.safariPerformanceMode);
+    document.documentElement.classList.toggle('safari-opaque-canvas', this.safariOpaqueCanvas && this.safariOptimizedMode);
 
     const currentOrientation = this.currentViewportOrientation();
     const actualWidthChange = !previousRect || Math.abs(Number(rect.width || 0) - Number(previousRect.width || 0)) >= 2;
@@ -789,37 +830,21 @@ export class CoreGameplayEngine {
       return;
     }
 
-    // Patch 1 — iPad Safari canvas pixel budget. Safari touch already caps
-    // DPR at 1, but large iPads can still push well over one million backing
-    // pixels every frame. Keep the CSS canvas/input space unchanged and only
-    // lower the backing store on iPadOS. Gameplay uses normalized coordinates,
-    // so movement, collision, fire rate and difficulty are unaffected.
-    const dprCap = this.safariPerformanceMode ? 1.0 : (this.safariDesktopPerformanceMode ? 1.5 : (this.mobilePortrait ? 1.5 : 2));
-    const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-    const iPadSafari = this.safariPerformanceMode && isIPadOSDevice();
-    const ipadBaseRenderScale = 0.90;
-    const ipadMaxRenderPixels = 800000;
-    const ipadMinRenderScale = 0.72;
-
-    let renderScale = iPadSafari ? ipadBaseRenderScale : 1;
-    if (iPadSafari) {
-      const scaledPixels = Math.max(1, rect.width * dpr * renderScale)
-        * Math.max(1, rect.height * dpr * renderScale);
-      if (scaledPixels > ipadMaxRenderPixels) {
-        renderScale *= Math.sqrt(ipadMaxRenderPixels / scaledPixels);
-      }
-      renderScale = clamp(renderScale, ipadMinRenderScale, 1);
-    }
-
-    const width = Math.max(1, Math.round(rect.width * dpr * renderScale));
-    const height = Math.max(1, Math.round(rect.height * dpr * renderScale));
+    // One consistent pixel ceiling on all three Safari form factors. No
+    // mid-combat auto-resizing: backing-store allocation itself causes a hitch.
+    const backing = canvasBackingPlan({ cssWidth: rect.width, cssHeight: rect.height,
+      deviceDpr: window.devicePixelRatio, safariMobile: this.safariPerformanceMode,
+      safariDesktop: this.safariDesktopPerformanceMode, ipad: isIPadOSDevice(),
+      mobilePortrait: this.mobilePortrait });
+    const { width, height } = backing;
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;
       this.safariBackgroundGeometry = null;
+      this.safariBackgroundSurface = null;
     }
-    this.dpr = dpr * renderScale;
-    this.renderScale = renderScale;
+    this.dpr = backing.dpr;
+    this.renderScale = backing.renderScale;
 
     if (this.safariPerformanceMode) {
       this.lockSafariGameplayViewport(rect);
@@ -948,6 +973,23 @@ export class CoreGameplayEngine {
     }
   }
 
+  recordPerformanceSample(now, updateMs, drawMs) {
+    if (!this.perfOverlay) return;
+    const sample = this.perfSamples;
+    if (!sample.startedAt) sample.startedAt = now;
+    sample.frames += 1;
+    sample.updateMs += updateMs;
+    sample.drawMs += drawMs;
+    sample.worstMs = Math.max(sample.worstMs, updateMs + drawMs);
+    const interval = now - sample.startedAt;
+    if (interval < 1000) return;
+    const averageUpdate = sample.updateMs / Math.max(1, sample.frames);
+    const averageDraw = sample.drawMs / Math.max(1, sample.frames);
+    const fps = sample.frames * 1000 / interval;
+    this.perfOverlay.textContent = `FPS ${fps.toFixed(1)} | JS update ${averageUpdate.toFixed(1)}ms | JS draw ${averageDraw.toFixed(1)}ms | worst JS ${sample.worstMs.toFixed(1)}ms | ${this.canvas.width}×${this.canvas.height} | ${this.safariHighRefreshMode ? '120Hz' : '60Hz/auto'}`;
+    this.perfSamples = { startedAt: now, frames: 0, updateMs: 0, drawMs: 0, worstMs: 0 };
+  }
+
   frame(time) {
     if (!this.running) return;
     const rawMs = Math.min(100, Math.max(0, time - this.lastTime));
@@ -982,8 +1024,14 @@ export class CoreGameplayEngine {
       // Safari is already late.
       const dt = frameMs / 1000;
       this.elapsed += dt;
+      const perfStart = this.perfDebug ? performance.now() : 0;
       this.update(dt);
+      const perfAfterUpdate = this.perfDebug ? performance.now() : 0;
       this.draw();
+      if (this.perfDebug) {
+        const perfAfterDraw = performance.now();
+        this.recordPerformanceSample(perfAfterDraw, perfAfterUpdate - perfStart, perfAfterDraw - perfAfterUpdate);
+      }
       this.lastDrawTime = time;
       this.observeRenderPerformance(time);
       this.raf = requestAnimationFrame((nextTime) => this.frame(nextTime));
@@ -2578,8 +2626,8 @@ export class CoreGameplayEngine {
     };
   }
 
-  normalizedBox(x, y, sizePx, scaleX = 0.58, scaleY = 0.58) {
-    const { width, height } = this.dimensions();
+  normalizedBox(x, y, sizePx, scaleX = 0.58, scaleY = 0.58, dim = this.dimensions()) {
+    const { width, height } = dim;
     return {
       x,
       y,
@@ -2593,13 +2641,13 @@ export class CoreGameplayEngine {
 
     for (let i = this.playerBullets.length - 1; i >= 0; i -= 1) {
       const bullet = this.playerBullets[i];
-      const bulletBox = this.normalizedBox(bullet.x, bullet.y, dim.playerBulletSize, 0.32, 0.62);
+      const bulletBox = this.normalizedBox(bullet.x, bullet.y, dim.playerBulletSize, 0.32, 0.62, dim);
       let hitEnemy = null;
       for (const enemy of this.enemies) {
         if (!enemy.alive || bullet.hitIds?.includes(enemy.id)) continue;
         if (Number(enemy.spawnAge || 0) < Number(enemy.spawnDuration || 0)) continue;
         const spec = ENEMY[enemy.type] || ENEMY.fighter;
-        const enemyBox = this.normalizedBox(enemy.x, enemy.y, dim.enemySize * spec.size, spec.hitScaleX, spec.hitScaleY);
+        const enemyBox = this.normalizedBox(enemy.x, enemy.y, dim.enemySize * spec.size, spec.hitScaleX, spec.hitScaleY, dim);
         if (intersects(bulletBox, enemyBox)) {
           hitEnemy = enemy;
           break;
@@ -2616,11 +2664,11 @@ export class CoreGameplayEngine {
     }
 
     if (this.player.respawnTimer > 0 || this.player.invulnerabilityTimer > 0 || this.player.lives <= 0) return;
-    const playerBox = this.normalizedBox(this.player.x, this.player.y, dim.playerSize, 0.42, 0.50);
+    const playerBox = this.normalizedBox(this.player.x, this.player.y, dim.playerSize, 0.42, 0.50, dim);
 
     for (let i = this.enemyBullets.length - 1; i >= 0; i -= 1) {
       const bullet = this.enemyBullets[i];
-      const bulletBox = this.normalizedBox(bullet.x, bullet.y, dim.enemyBulletSize * (bullet.charged ? 1.25 : 1), 0.30, 0.52);
+      const bulletBox = this.normalizedBox(bullet.x, bullet.y, dim.enemyBulletSize * (bullet.charged ? 1.25 : 1), 0.30, 0.52, dim);
       if (!intersects(playerBox, bulletBox)) continue;
       this.enemyBullets.splice(i, 1);
       this.damagePlayer();
@@ -2630,7 +2678,7 @@ export class CoreGameplayEngine {
     for (const enemy of this.enemies) {
       if (!enemy.alive || enemy.mode === 'formation' || enemy.type === 'finalBoss') continue;
       const spec = ENEMY[enemy.type] || ENEMY.fighter;
-      const enemyBox = this.normalizedBox(enemy.x, enemy.y, dim.enemySize * spec.size, spec.hitScaleX * 0.85, spec.hitScaleY * 0.85);
+      const enemyBox = this.normalizedBox(enemy.x, enemy.y, dim.enemySize * spec.size, spec.hitScaleX * 0.85, spec.hitScaleY * 0.85, dim);
       if (!intersects(playerBox, enemyBox)) continue;
       this.damagePlayer();
       if (enemy.type === 'charger') this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: 0.32, kind: 'chargeImpact' });
@@ -2925,7 +2973,7 @@ export class CoreGameplayEngine {
   }
 
   drawAmbientSpace(dim) {
-    if (this.safariPerformanceMode || !this.ambientParticles?.length) return;
+    if (this.safariOptimizedMode || !this.ambientParticles?.length) return;
     const { ctx } = this;
     ctx.save();
     ctx.globalCompositeOperation = this.vfxComposite(this.mobilePortrait && this.adaptiveVfxLevel >= 2 ? 'source-over' : 'lighter');
@@ -2986,7 +3034,7 @@ export class CoreGameplayEngine {
     const x = boss.x * dim.width;
     const y = boss.y * dim.height;
     this.ctx.save();
-    if (this.safariPerformanceMode) {
+    if (this.safariOptimizedMode) {
       this.ctx.globalAlpha = life * (boss.type === 'finalBoss' ? 0.18 : 0.12);
       this.ctx.fillStyle = boss.type === 'finalBoss' ? '#4a1008' : '#382006';
       this.ctx.fillRect(0, 0, dim.width, dim.height);
@@ -3047,7 +3095,7 @@ export class CoreGameplayEngine {
   }
 
   drawWaveStartSweep(dim) {
-    if (this.safariPerformanceMode || this.waveStartFxTimer <= 0) return;
+    if (this.safariOptimizedMode || this.waveStartFxTimer <= 0) return;
     const progress = 1 - clamp(this.waveStartFxTimer / 1.25, 0, 1);
     const fade = Math.sin(clamp(progress, 0, 1) * Math.PI);
     const y = dim.height * (0.14 + progress * 0.72);
@@ -3079,7 +3127,7 @@ export class CoreGameplayEngine {
   }
 
   drawOverdriveField(dim) {
-    if (this.safariPerformanceMode) return;
+    if (this.safariOptimizedMode) return;
     if (this.overdriveTimer <= 0 || this.player.lives <= 0) return;
     const remaining = clamp(this.overdriveTimer / 7, 0, 1);
     const entrance = clamp((7 - this.overdriveTimer) / 0.35, 0, 1);
@@ -3130,7 +3178,7 @@ export class CoreGameplayEngine {
     const laneHalf = this.bossLaser.width * dim.width;
     const top = dim.height * 0.08;
     const bottom = dim.height * 0.94;
-    if (this.safariPerformanceMode) {
+    if (this.safariOptimizedMode) {
       this.ctx.save();
       if (this.bossLaser.telegraph > 0) {
         const duration = Math.max(0.01, Number(this.bossLaser.telegraphDuration || this.bossLaser.telegraph));
@@ -3256,7 +3304,7 @@ export class CoreGameplayEngine {
 
   safariBackgroundForCurrentOrientation() {
     if (!this.safariOpaqueCanvas) return null;
-    const portrait = this.canvas.height >= this.canvas.width;
+    const portrait = this.currentViewportOrientation() === 'portrait';
     if (this.safariGameplayBackground && this.safariGameplayBackgroundPortrait === portrait) {
       return this.safariGameplayBackground;
     }
@@ -3309,7 +3357,23 @@ export class CoreGameplayEngine {
       this.safariBackgroundGeometry = geometry;
     }
 
-    ctx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, dim.width, dim.height);
+    // Decode/crop/scale only after image arrival or an actual orientation/size
+    // change. Normal frames blit the already sized backing image 1:1.
+    let surface = this.safariBackgroundSurface;
+    if (!surface || surface.key !== geometryKey || surface.image !== image) {
+      const cached = document.createElement('canvas');
+      cached.width = dim.width;
+      cached.height = dim.height;
+      const cachedCtx = cached.getContext('2d', { alpha: false });
+      if (cachedCtx) {
+        cachedCtx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh,
+          0, 0, dim.width, dim.height);
+        surface = { key: geometryKey, image, canvas: cached };
+        this.safariBackgroundSurface = surface;
+      }
+    }
+    if (surface?.canvas) ctx.drawImage(surface.canvas, 0, 0);
+    else ctx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, dim.width, dim.height);
     return true;
   }
 
@@ -3582,7 +3646,7 @@ export class CoreGameplayEngine {
   }
 
   drawEnemySpawnStreak(enemy, state, dim, palette) {
-    if (this.safariPerformanceMode) return;
+    if (this.safariOptimizedMode) return;
     const t = state.spawnT;
     const x = state.x * dim.width;
     const y = state.y * dim.height;
@@ -3772,7 +3836,7 @@ export class CoreGameplayEngine {
     const x = Number(effect.x || 0) * dim.width;
     const y = Number(effect.y || 0) * dim.height;
 
-    if (this.safariPerformanceMode && ['energyCloud', 'secondaryBurst', 'coreFlash'].includes(effect.kind)) return;
+    if (this.safariOptimizedMode && ['energyCloud', 'secondaryBurst', 'coreFlash'].includes(effect.kind)) return;
 
     if (effect.kind === 'spriteEffect') {
       const image = this.images[effect.spriteKey];
@@ -4376,7 +4440,7 @@ export class CoreGameplayEngine {
   }
 
   drawPatternBanner(label, dim) {
-    if (this.safariPerformanceMode) return;
+    if (this.safariOptimizedMode) return;
     const alpha = clamp(this.patternBanner.timer / 0.35, 0, 1);
     const text = String(label || 'PATTERN').toUpperCase();
     this.ctx.save();
