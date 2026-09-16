@@ -3,6 +3,10 @@ import { createGameplayImageView } from './assetCache.js';
 import { SCORE_VALUES, accuracyBonusRate, comboStepsForDifficulty, comboWindowForDifficulty, waveDefinition } from './waveConfig.js';
 
 const CORE_STATE_SYNC_INTERVAL_SECONDS = 4;
+// Reuse WebKit canvas resources across wave-engine remounts. Bound the background
+// cache to two orientation/size combinations (never one surface per wave).
+const SAFARI_BACKGROUND_SURFACES = new Map();
+const SAFARI_ROTATED_SPRITES = new WeakMap();
 
 const DANGEROUS_ROUTE_TELEGRAPHS = new Set(['dive', 'charge', 'pincer', 'spiral', 'eliteAssault']);
 const UNDER_BULLET_EFFECTS = new Set(['energyCloud', 'explosion', 'secondaryBurst', 'deathRing', 'coreFlash']);
@@ -390,7 +394,7 @@ export class CoreGameplayEngine {
     // Patch 7 — sustained Safari combat profile. The cache stores a small
     // pre-rotated copy of formation sprites so WebKit does not execute a
     // translate/rotate/restore stack for every stationary enemy every frame.
-    this.safariHalfTurnSpriteCache = new WeakMap();
+    this.safariHalfTurnSpriteCache = SAFARI_ROTATED_SPRITES;
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -543,8 +547,9 @@ export class CoreGameplayEngine {
     const numeric = Math.max(0, Number(value) || 0);
     // shadowBlur is disproportionately expensive on iOS Safari's Canvas 2D
     // compositor. Keep silhouettes/sprites intact and drop only the blur halo.
-    if (this.safariPerformanceMode) return 0;
-    if (this.safariDesktopPerformanceMode) return numeric * (this.adaptiveVfxLevel >= 2 ? 0.28 : 0.42);
+    // Once Wave 3 adds more enemies/projectiles, even a small shadowBlur on
+    // each sprite can force expensive WebKit compositor passes (Mac included).
+    if (this.safariOptimizedMode) return 0;
     return this.mobilePortrait ? numeric * 0.58 * this.adaptiveVfxScale() : numeric;
   }
 
@@ -968,8 +973,12 @@ export class CoreGameplayEngine {
       };
     });
     this.formationRespawnClock = 0;
-    for (const enemy of this.enemies) {
-      this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: ['miniBoss', 'finalBoss'].includes(enemy.type) ? 0.65 : 0.38, kind: 'spawn' });
+    // Enemy arrival is already animated by spawnAge/opacity. On Safari, avoid
+    // 18 simultaneous additional translucent sprite passes at Wave 3 entry.
+    if (!this.safariOptimizedMode) {
+      for (const enemy of this.enemies) {
+        this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: ['miniBoss', 'finalBoss'].includes(enemy.type) ? 0.65 : 0.38, kind: 'spawn' });
+      }
     }
   }
 
@@ -986,7 +995,7 @@ export class CoreGameplayEngine {
     const averageUpdate = sample.updateMs / Math.max(1, sample.frames);
     const averageDraw = sample.drawMs / Math.max(1, sample.frames);
     const fps = sample.frames * 1000 / interval;
-    this.perfOverlay.textContent = `FPS ${fps.toFixed(1)} | JS update ${averageUpdate.toFixed(1)}ms | JS draw ${averageDraw.toFixed(1)}ms | worst JS ${sample.worstMs.toFixed(1)}ms | ${this.canvas.width}×${this.canvas.height} | ${this.safariHighRefreshMode ? '120Hz' : '60Hz/auto'}`;
+    this.perfOverlay.textContent = `Wave ${this.currentWave} | FPS ${fps.toFixed(1)} | enemies ${this.enemies.filter((enemy) => enemy.alive).length} | bullets ${this.playerBullets.length + this.enemyBullets.length} | VFX ${this.effects.length} | JS update ${averageUpdate.toFixed(1)}ms | JS draw ${averageDraw.toFixed(1)}ms | worst JS ${sample.worstMs.toFixed(1)}ms | ${this.canvas.width}×${this.canvas.height} | ${this.safariHighRefreshMode ? '120Hz' : '60Hz/auto'}`;
     this.perfSamples = { startedAt: now, frames: 0, updateMs: 0, drawMs: 0, worstMs: 0 };
   }
 
@@ -2753,7 +2762,7 @@ export class CoreGameplayEngine {
     this.comboTimer = this.comboWindow;
     this.addOverdriveEnergy(4);
     this.spawnEnemyDeathVfx(enemy);
-    if (!this.safariPerformanceMode) {
+    if (!this.safariOptimizedMode) {
       this.effects.push({ x: enemy.x, y: enemy.y - 0.025, age: 0, duration: 0.72, kind: 'scoreText', text: `+${award.toLocaleString()}`, color: '#effcff' });
       if (dangerKill) this.effects.push({ x: enemy.x, y: enemy.y + 0.012, age: 0, duration: 0.68, kind: 'riskText', text: 'RISK +25%', color: '#ffbf79' });
       if (nextCombo > previousCombo) this.effects.push({ x: enemy.x, y: enemy.y + 0.035, age: 0, duration: 0.82, kind: 'comboText', text: `COMBO x${nextCombo}`, color: '#7ff2ff' });
@@ -2805,10 +2814,17 @@ export class CoreGameplayEngine {
       }
       return;
     }
-    if (this.safariPerformanceMode) {
+    // Dense wave explosions: preserve the readable sprite and hit ring, but
+    // avoid debris floods when Mac Safari must render many kills together.
+    if (this.safariPerformanceMode || (this.safariDesktopPerformanceMode && this.enemies.length >= 16 && !boss)) {
       const duration = boss ? 0.52 : heavy ? 0.34 : 0.24;
       this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration, kind: 'explosion', enemyType: enemy.type, color: palette.burst, bomb });
       if (boss || heavy) this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: duration * 0.68, kind: 'deathRing', enemyType: enemy.type, color: palette.burst, strength: boss ? 1.2 : 0.9 });
+      if (this.safariDesktopPerformanceMode) {
+        // Original Mac debris consumed four gameplay RNG draws per fragment.
+        // Keep its RNG stream aligned even though its visual debris is skipped.
+        for (let i = 0; i < (heavy ? 3 : 2) * 4; i += 1) this.random();
+      }
       return;
     }
     if (this.safariDesktopPerformanceMode) {
@@ -3359,18 +3375,27 @@ export class CoreGameplayEngine {
 
     // Decode/crop/scale only after image arrival or an actual orientation/size
     // change. Normal frames blit the already sized backing image 1:1.
+    const source = image.currentSrc || image.src || '';
+    const cacheKey = `${source}:${geometryKey}`;
     let surface = this.safariBackgroundSurface;
-    if (!surface || surface.key !== geometryKey || surface.image !== image) {
-      const cached = document.createElement('canvas');
-      cached.width = dim.width;
-      cached.height = dim.height;
-      const cachedCtx = cached.getContext('2d', { alpha: false });
-      if (cachedCtx) {
-        cachedCtx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh,
-          0, 0, dim.width, dim.height);
-        surface = { key: geometryKey, image, canvas: cached };
-        this.safariBackgroundSurface = surface;
+    if (!surface || surface.cacheKey !== cacheKey) {
+      surface = SAFARI_BACKGROUND_SURFACES.get(cacheKey);
+      if (!surface) {
+        const cached = document.createElement('canvas');
+        cached.width = dim.width;
+        cached.height = dim.height;
+        const cachedCtx = cached.getContext('2d', { alpha: false });
+        if (cachedCtx) {
+          cachedCtx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh,
+            0, 0, dim.width, dim.height);
+          surface = { cacheKey, canvas: cached };
+          SAFARI_BACKGROUND_SURFACES.set(cacheKey, surface);
+          if (SAFARI_BACKGROUND_SURFACES.size > 2) {
+            SAFARI_BACKGROUND_SURFACES.delete(SAFARI_BACKGROUND_SURFACES.keys().next().value);
+          }
+        }
       }
+      this.safariBackgroundSurface = surface || null;
     }
     if (surface?.canvas) ctx.drawImage(surface.canvas, 0, 0);
     else ctx.drawImage(image, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, dim.width, dim.height);
@@ -3596,7 +3621,7 @@ export class CoreGameplayEngine {
       this.ctx.restore();
     }
 
-    if (state.spawnT < 1) this.drawEnemySpawnStreak(enemy, state, dim, palette);
+    if (!this.safariOptimizedMode && state.spawnT < 1) this.drawEnemySpawnStreak(enemy, state, dim, palette);
     if (enemy.attackTime < 0 && enemy.mode !== 'formation') this.drawAttackTelegraph(enemy, state, dim, palette);
     if (enemy.pendingShot) this.drawShooterCharge(enemy, state, dim, palette);
 
@@ -3704,7 +3729,7 @@ export class CoreGameplayEngine {
   }
 
   drawAttackRouteTelegraph(enemy, state, dim, palette, remaining) {
-    if (this.safariPerformanceMode) return;
+    if (this.safariOptimizedMode) return;
     const attack = enemy.attack || {};
     if (!DANGEROUS_ROUTE_TELEGRAPHS.has(String(attack.kind || ''))) return;
     const samples = attack.kind === 'spiral' ? 20 : 14;
@@ -3742,7 +3767,7 @@ export class CoreGameplayEngine {
     const targetY = Number(attack.targetY ?? this.player.y) * dim.height;
     const charge = attack.kind === 'charge';
 
-    if (this.safariPerformanceMode) {
+    if (this.safariOptimizedMode) {
       // Gameplay-critical warning stays visible, but WebKit avoids dashed lines,
       // animated dash offsets and multi-pass route drawing.
       this.ctx.save();
@@ -3803,7 +3828,7 @@ export class CoreGameplayEngine {
     this.ctx.globalAlpha = 0.68 + progress * 0.30;
     this.ctx.shadowBlur = this.vfxGlow(22);
     this.ctx.shadowColor = enemy.type === 'elite' ? '#ff67e2' : '#ffab62';
-    if (this.safariPerformanceMode) {
+    if (this.safariOptimizedMode) {
       this.ctx.fillStyle = enemy.type === 'elite' ? '#ff92ec' : '#ffd092';
       this.ctx.globalAlpha = 0.52 + progress * 0.26;
     } else {
@@ -4088,7 +4113,7 @@ export class CoreGameplayEngine {
     const tailX = x - ux * tailLength;
     const tailY = y - uy * tailLength;
     let strokeStyle = color;
-    if (!this.mobilePortrait) {
+    if (!this.mobilePortrait && !this.safariOptimizedMode) {
       const gradient = this.ctx.createLinearGradient(x, y, tailX, tailY);
       gradient.addColorStop(0, color);
       gradient.addColorStop(0.22, color);

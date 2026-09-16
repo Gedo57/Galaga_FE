@@ -349,22 +349,43 @@ async function preloadAssets(urls, { onProgress } = {}) {
 }
 
 
+// One preload per wave/difficulty. Clearing a wave no longer launches two
+// overlapping asset scans or evicts current sprites while the canvas is live.
+const waveAssetJobs = new Map();
+let nextWaveWarmup = null;
 async function prepareGameplayWaveAssets(wave, { trim = true, onProgress } = {}) {
   const targetWave = Math.max(1, Math.min(10, Number(wave) || 1));
   const difficulty = model.session?.difficulty || model.selectedDifficulty || 'medium';
-  if (trim) retainGameplayAssetsForWave(targetWave, difficulty);
-  const summary = await preloadGameplayAssetsForWave(targetWave, difficulty, { onProgress });
-  if (summary.failed.length) console.warn(`Wave ${targetWave} assets unavailable:`, summary.failed);
-  return summary;
+  // Retention is safe only after stopGameplayEngine() has detached the old loop.
+  // Warmup must ADD upcoming sprites instead of discarding still-visible ones.
+  if (trim && !activeEngine) retainGameplayAssetsForWave(targetWave, difficulty);
+  const key = `${targetWave}:${difficulty}`;
+  let job = waveAssetJobs.get(key);
+  if (!job) {
+    job = preloadGameplayAssetsForWave(targetWave, difficulty, { onProgress });
+    waveAssetJobs.set(key, job);
+  }
+  try {
+    const summary = await job;
+    if (summary.failed.length) console.warn(`Wave ${targetWave} assets unavailable:`, summary.failed);
+    return summary;
+  } finally {
+    if (waveAssetJobs.get(key) === job) waveAssetJobs.delete(key);
+  }
 }
 
 function warmNextWaveAssets() {
   const nextWave = Number(model.wave || 1) + 1;
   if (nextWave > 10) return Promise.resolve({ total: 0, loaded: 0, failed: [] });
-  return prepareGameplayWaveAssets(nextWave, { trim: true }).catch((error) => {
+  const key = `${model.session?.id || 'local'}:${nextWave}:${model.session?.difficulty || model.selectedDifficulty || 'medium'}`;
+  if (nextWaveWarmup?.key === key) return nextWaveWarmup.promise;
+  const promise = prepareGameplayWaveAssets(nextWave, { trim: false }).catch((error) => {
+    if (nextWaveWarmup?.promise === promise) nextWaveWarmup = null;
     console.warn(`Wave ${nextWave} asset warmup failed:`, error?.message || error);
     return { total: 0, loaded: 0, failed: [] };
   });
+  nextWaveWarmup = { key, promise };
+  return promise;
 }
 
 
@@ -591,7 +612,7 @@ function handleVfxEvent(event = {}) {
   if (!screen) return;
   // Canvas feedback remains active; Safari portrait avoids DOM class churn,
   // overlay creation and forced style/layout work during combat.
-  if (isSafariPortraitPerformanceMode()) return;
+  if (isSafariGameplayPerformanceMode()) return;
   if (type === 'wave-start') {
     screen.classList.remove('wave-start-live'); void screen.offsetWidth; screen.classList.add('wave-start-live');
     pulseHud('[data-hud-wave]', 'hud-wave-pop', 720);
@@ -680,7 +701,7 @@ function showWaveIntro() {
   if (!layer) return;
   const elapsed = Number(activeEngine?.snapshot?.().waveElapsed ?? model.stats.waveElapsed ?? 0);
   if (elapsed < 1.5) audioManager.playSfx('waveStart', { volume: 0.58, rate: 1, throttleMs: 700, poolSize: 2 });
-  if (isSafariPortraitPerformanceMode()) return;
+  if (isSafariGameplayPerformanceMode()) return;
   const def = waveDefinition(model.wave, activeDifficulty());
   const node = document.createElement('div');
   node.className = `wave-intro-banner ${def.final ? 'final' : ''}`;
@@ -936,7 +957,6 @@ function render() {
   audioManager.setMusicTrack(musicTrackForState(state));
   queueMicrotask(() => app.querySelector('.screen')?.classList.add('screen-ready'));
   if (state === GameState.WAVE_PLAYING) queueMicrotask(mountGameplayEngine);
-  if (state === GameState.WAVE_CLEAR) queueMicrotask(() => { warmNextWaveAssets(); });
   if (state === GameState.CHECKPOINT) queueMicrotask(startCheckpointClock);
 }
 function startCheckpointClock() {
