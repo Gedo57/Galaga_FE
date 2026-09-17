@@ -77,6 +77,7 @@ const ENEMY_ASSET_KEYS = Object.freeze({
 
 const imageCache = new Map();
 const loadPromises = new Map();
+const decodedImages = new WeakSet();
 const PRELOAD_TIMEOUT_MS = 20000;
 const PRELOAD_CONCURRENCY = 4;
 
@@ -107,32 +108,52 @@ export function getGameplayImage(key) {
   return image;
 }
 
+// A loaded image is not necessarily decoded. Both HTTP-cache hits and new
+// downloads use the same bounded decode gate before a wave can start.
+export function getDecodedGameplayImage(key) {
+  const image = imageCache.get(key);
+  return image && decodedImages.has(image) && image.naturalWidth > 0 ? image : null;
+}
+
 function waitForGameplayImage(key) {
   const image = getGameplayImage(key);
   if (!image) return Promise.resolve({ key, url: '', ok: false });
-  if (image.complete) return Promise.resolve({ key, url: GAMEPLAY_ASSETS[key], ok: image.naturalWidth > 0 });
+  if (decodedImages.has(image)) {
+    return Promise.resolve({ key, url: GAMEPLAY_ASSETS[key], ok: image.naturalWidth > 0 });
+  }
   if (loadPromises.has(key)) return loadPromises.get(key);
 
   const promise = new Promise((resolve) => {
     let settled = false;
-    const finish = async (ok) => {
+    let decoding = false;
+    const finish = (ok) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       image.removeEventListener('load', onLoad);
       image.removeEventListener('error', onError);
-      if (ok && typeof image.decode === 'function') {
-        try { await image.decode(); } catch {}
-      }
-      resolve({ key, url: GAMEPLAY_ASSETS[key], ok: Boolean(ok && image.naturalWidth > 0) });
+      const ready = Boolean(ok && image.naturalWidth > 0);
+      if (ready) decodedImages.add(image);
+      resolve({ key, url: GAMEPLAY_ASSETS[key], ok: ready });
     };
-    const onLoad = () => finish(true);
+    const onLoad = async () => {
+      if (settled || decoding) return;
+      if (!image.naturalWidth) { finish(false); return; }
+      decoding = true;
+      try {
+        if (typeof image.decode === 'function') await image.decode();
+        finish(true);
+      } catch {
+        finish(false);
+      }
+    };
     const onError = () => finish(false);
+    // Keep this deadline active during decode too: a stuck decode must never
+    // leave the loading screen waiting forever. Late completions are ignored.
     const timer = window.setTimeout(() => finish(false), PRELOAD_TIMEOUT_MS);
     image.addEventListener('load', onLoad, { once: true });
     image.addEventListener('error', onError, { once: true });
-    // Cover a cache hit that completed between the first complete check and listener setup.
-    if (image.complete) queueMicrotask(() => finish(image.naturalWidth > 0));
+    if (image.complete) queueMicrotask(onLoad);
   }).finally(() => loadPromises.delete(key));
 
   loadPromises.set(key, promise);

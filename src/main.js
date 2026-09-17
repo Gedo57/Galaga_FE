@@ -97,12 +97,16 @@ function handleAudioEvent(event = {}) {
     if (bossLike) audioManager.playSfx('explosion', { volume: 0.72, rate: 0.86, poolSize: 3 });
     else audioManager.playSfx('enemyDestroy', { volume: 0.18, rate: enemyType === 'heavy' || enemyType === 'elite' ? 0.92 : 1.04, throttleMs: isSafariDesktopBrowser() ? 90 : 75, poolSize: isSafariTouchBrowser() ? 3 : (isSafariDesktopBrowser() ? 4 : 6) });
   } else if (type === 'boss-laser-telegraph') {
-    if (!isSafariGameplayPerformanceMode()) {
+    audioManager.playSfx('chargeUp', { volume: 0.52, rate: 0.92, throttleMs: 250, poolSize: 2 });
+    const screen = app.querySelector('.gameplay-screen');
+    if (screen && !isSafariGameplayPerformanceMode()) {
       screen.classList.remove('laser-warning-live'); void screen.offsetWidth; screen.classList.add('laser-warning-live');
       window.setTimeout(() => screen.classList.remove('laser-warning-live'), Math.max(650, Number(event.telegraph || 1) * 1000));
     }
   } else if (type === 'boss-laser-fire') {
-    if (!isSafariGameplayPerformanceMode()) {
+    audioManager.playSfx('laser', { volume: 0.70, rate: 0.66, poolSize: 3, priority: 'important' });
+    const screen = app.querySelector('.gameplay-screen');
+    if (screen && !isSafariGameplayPerformanceMode()) {
       screen.classList.remove('laser-fire-live'); void screen.offsetWidth; screen.classList.add('laser-fire-live');
       window.setTimeout(() => screen.classList.remove('laser-fire-live'), 260);
     }
@@ -110,10 +114,6 @@ function handleAudioEvent(event = {}) {
     if (Number(event.lives || 0) <= 0) audioManager.playSfx('explosion', { volume: 0.82, rate: 0.92, poolSize: 3 });
   } else if (type === 'dive-flyby') {
     audioManager.playSfx('diveFlyby', { volume: 0.40, rate: 1, throttleMs: 90, poolSize: 4 });
-  } else if (type === 'boss-laser-telegraph') {
-    audioManager.playSfx('chargeUp', { volume: 0.52, rate: 0.92, throttleMs: 250, poolSize: 2 });
-  } else if (type === 'boss-laser-fire') {
-    audioManager.playSfx('laser', { volume: 0.70, rate: 0.66, poolSize: 3 });
   }
 }
 
@@ -1410,7 +1410,7 @@ window.addEventListener('popstate', () => {
   if (startupFailures.length) console.warn('Startup assets unavailable:', startupFailures);
 
   // Pools are created only after their media files have been warmed into browser cache.
-  audioManager.prewarmGameplayPools();
+  await audioManager.prewarmGameplayPools();
   updateLoadingProgress(100, STARTUP_TOTAL_ASSETS, STARTUP_TOTAL_ASSETS, 'Loading....');
   const playerResult = await playerRequest;
 

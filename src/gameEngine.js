@@ -1,12 +1,12 @@
 import { PatternDirector, PATTERNS } from './patternDirector.js';
-import { createGameplayImageView } from './assetCache.js';
+import { createGameplayImageView, gameplayAssetKeysForWave, getDecodedGameplayImage } from './assetCache.js';
+import { SpriteRasterCache } from './spriteRasterCache.js';
 import { SCORE_VALUES, accuracyBonusRate, comboStepsForDifficulty, comboWindowForDifficulty, waveDefinition } from './waveConfig.js';
 
 const CORE_STATE_SYNC_INTERVAL_SECONDS = 4;
 // Reuse WebKit canvas resources across wave-engine remounts. Bound the background
 // cache to two orientation/size combinations (never one surface per wave).
 const SAFARI_BACKGROUND_SURFACES = new Map();
-const SAFARI_ROTATED_SPRITES = new WeakMap();
 
 const DANGEROUS_ROUTE_TELEGRAPHS = new Set(['dive', 'charge', 'pincer', 'spiral', 'eliteAssault']);
 const UNDER_BULLET_EFFECTS = new Set(['energyCloud', 'explosion', 'secondaryBurst', 'deathRing', 'coreFlash']);
@@ -387,10 +387,9 @@ export class CoreGameplayEngine {
     this.perfSamples = { startedAt: 0, frames: 0, updateMs: 0, drawMs: 0, worstMs: 0 };
     this.hudDirty = false;
     this.hudFlushClock = 0;
-    // Patch 7 — sustained Safari combat profile. The cache stores a small
-    // pre-rotated copy of formation sprites so WebKit does not execute a
-    // translate/rotate/restore stack for every stationary enemy every frame.
-    this.safariHalfTurnSpriteCache = SAFARI_ROTATED_SPRITES;
+    // Patch 1: prepare bounded, display-sized sprites before the first frame.
+    this.spriteRasterCache = new SpriteRasterCache();
+    this.spriteRasterCacheGeometry = '';
     this.running = false;
     this.raf = 0;
     this.lastTime = 0;
@@ -776,6 +775,8 @@ export class CoreGameplayEngine {
     if (!this.running) return;
     this.running = false;
     cancelAnimationFrame(this.raf);
+    this.spriteRasterCache.clear();
+    this.spriteRasterCacheGeometry = '';
     this.perfOverlay?.remove();
     this.perfOverlay = null;
     window.removeEventListener('resize', this.boundResize);
@@ -893,6 +894,7 @@ export class CoreGameplayEngine {
       this.hudDirty = false;
       this.hudFlushClock = 0;
     }
+    this.prepareSafariSpriteRasters();
   }
 
   handleKeyDown(event) {
@@ -3533,7 +3535,7 @@ export class CoreGameplayEngine {
     const startY = boss ? -0.10 : -0.16 - (enemy.slotIndex % 3) * 0.025;
     const x = spawnT < 1 ? lerp(startX, enemy.x, spawnEase) + Math.sin(spawnT * Math.PI) * 0.045 * direction : enemy.x;
     const y = spawnT < 1 ? lerp(startY, enemy.y, spawnEase) : enemy.y;
-    const idlePulse = this.reducedMotion ? 1 : 1 + Math.sin(this.elapsed * (enemy.type === 'heavy' ? 3.2 : 4.4) + Number(enemy.idleSeed || 0)) * (boss ? 0.018 : 0.026);
+    const idlePulse = (this.reducedMotion || this.safariOptimizedMode) ? 1 : 1 + Math.sin(this.elapsed * (enemy.type === 'heavy' ? 3.2 : 4.4) + Number(enemy.idleSeed || 0)) * (boss ? 0.018 : 0.026);
     const settle = spawnT < 1 ? 0.76 + spawnEase * 0.24 + Math.sin(spawnT * Math.PI) * 0.08 : 1;
     const alpha = spawnT < 0.05 ? 0 : clamp(spawnT * 1.8, 0, 1);
     const idleRoll = enemy.mode === 'formation' && !this.reducedMotion && !this.safariOptimizedMode
@@ -4148,7 +4150,7 @@ export class CoreGameplayEngine {
   drawPlayerProjectile(bullet, dim) {
     const overdrive = bullet.sprite === 'playerBulletOverdrive';
     const portraitOverdrive = this.mobilePortrait && overdrive;
-    const pulse = 1 + Math.sin(Number(bullet.age || 0) * 34) * (this.reducedMotion ? 0.015 : 0.04);
+    const pulse = this.safariOptimizedMode ? 1 : 1 + Math.sin(Number(bullet.age || 0) * 34) * (this.reducedMotion ? 0.015 : 0.04);
     if (!this.safariOptimizedMode) this.drawProjectileTrail(bullet, dim, {
       color: overdrive ? '#b6ffff' : '#66dcff',
       length: portraitOverdrive ? 0.052 : (overdrive ? 0.082 : 0.060),
@@ -4181,7 +4183,7 @@ export class CoreGameplayEngine {
     const dangerous = Boolean(bullet.charged) || /charged|special|finalBoss|miniBoss/i.test(sprite);
     const spec = PROJECTILE_VFX[sprite] || {};
     const color = bullet.trailColor || spec.color || (dangerous ? '#ffb36a' : '#ff704f');
-    const pulse = 1 + Math.sin(Number(bullet.age || 0) * 28) * (this.reducedMotion ? 0.01 : (dangerous ? 0.05 : 0.025));
+    const pulse = this.safariOptimizedMode ? 1 : 1 + Math.sin(Number(bullet.age || 0) * 28) * (this.reducedMotion ? 0.01 : (dangerous ? 0.05 : 0.025));
     if (!this.safariOptimizedMode && (!this.mobilePortrait || dangerous)) {
       this.drawProjectileTrail(bullet, dim, {
         color,
@@ -4490,55 +4492,74 @@ export class CoreGameplayEngine {
     this.ctx.restore();
   }
 
-  safariHalfTurnSprite(image) {
-    if (!this.safariOptimizedMode || !canDraw(image)) return null;
-    const cached = this.safariHalfTurnSpriteCache.get(image);
-    if (cached) return cached;
+  prepareSafariSpriteRasters() {
+    if (!this.safariOptimizedMode) {
+      this.spriteRasterCache.clear();
+      this.spriteRasterCacheGeometry = '';
+      return;
+    }
+    const dim = this.dimensions();
+    const geometry = `${dim.width}x${dim.height}:${this.currentWave}:${this.difficulty}`;
+    if (this.spriteRasterCacheGeometry === geometry) return;
+    this.spriteRasterCache.clear();
+    this.spriteRasterCacheGeometry = geometry;
+    // Loading/decoding is owned by assetCache. Never activate lazy image
+    // getters here, and never allocate a missing raster during drawSprite().
+    for (const key of gameplayAssetKeysForWave(this.currentWave, this.difficulty)) {
+      const image = getDecodedGameplayImage(key);
+      if (!image) continue;
+      if (ENEMY[key]) {
+        this.spriteRasterCache.prepare(image, dim.enemySize * ENEMY[key].size, true);
+      } else if (key === 'player') {
+        this.spriteRasterCache.prepare(image, dim.playerSize);
+      } else if (key === 'playerBullet' || key === 'playerBulletOverdrive') {
+        this.spriteRasterCache.prepare(image, dim.playerBulletSize * (key === 'playerBulletOverdrive' ? 1.10 : 1));
+      } else if (/Bullet|Charged|Special|Projectile/.test(key)) {
+        const dangerous = /charged|special|finalBoss|miniBoss/i.test(key);
+        const size = dim.enemyBulletSize * Number(PROJECTILE_VFX[key]?.scale || 1) * (dangerous ? 1.06 : 1);
+        this.spriteRasterCache.prepare(image, size, true);
+        this.spriteRasterCache.prepare(image, size * 1.18, true);
+      } else {
+        const size = key === 'shield' ? dim.playerSize * 1.45
+          : key === 'overdrive' ? dim.playerSize * 1.6
+          : key === 'bomb' ? dim.min * 0.60
+          : key === 'explosion' ? dim.min * 0.28
+          : key === 'miniBossPhaseAura' ? dim.enemySize * ENEMY.miniBoss.size * 1.26
+          : dim.min * 0.22;
+        this.spriteRasterCache.prepare(image, size);
+      }
+    }
+  }
 
-    const sourceW = Math.max(1, Number(image.naturalWidth || image.width || 1));
-    const sourceH = Math.max(1, Number(image.naturalHeight || image.height || 1));
-    const maxSide = 384;
-    const scale = Math.min(1, maxSide / Math.max(sourceW, sourceH));
-    const width = Math.max(1, Math.round(sourceW * scale));
-    const height = Math.max(1, Math.round(sourceH * scale));
-    const surface = document.createElement('canvas');
-    surface.width = width;
-    surface.height = height;
-    const cacheCtx = surface.getContext('2d', { alpha: true });
-    if (!cacheCtx) return null;
-    cacheCtx.translate(width, height);
-    cacheCtx.rotate(Math.PI);
-    cacheCtx.drawImage(image, 0, 0, width, height);
-    this.safariHalfTurnSpriteCache.set(image, surface);
-    return surface;
+  blitPreparedSprite(source, left, top, size, prepared) {
+    if (prepared && source.width === size && source.height === size) this.ctx.drawImage(source, left, top);
+    else this.ctx.drawImage(source, left, top, size, size);
   }
 
   drawSprite(image, nx, ny, sizePx, rotation = 0) {
     if (!canDraw(image)) return;
     const x = nx * this.canvas.width;
     const y = ny * this.canvas.height;
-
+    // Only visual dimensions are snapped. World positions and hitboxes retain
+    // full precision; moving actors keep their authored rotation/animation.
+    const size = this.safariOptimizedMode ? Math.max(1, Math.round(sizePx)) : sizePx;
+    const raster = this.safariOptimizedMode ? this.spriteRasterCache.lookup(image, size) : null;
+    const source = raster?.upright || image;
     if (Math.abs(rotation) < 0.00001) {
-      this.ctx.drawImage(image, x - sizePx / 2, y - sizePx / 2, sizePx, sizePx);
+      this.blitPreparedSprite(source, x - size / 2, y - size / 2, size, Boolean(raster));
       return;
     }
-
-    // Most formation enemies sit at exactly PI. Safari can draw the cached
-    // half-turn image directly instead of rebuilding a transform stack 60x/sec.
-    if (this.safariOptimizedMode && Math.abs(Math.abs(rotation) - Math.PI) < 0.00001) {
-      const cached = this.safariHalfTurnSprite(image);
-      if (cached) {
-        this.ctx.drawImage(cached, x - sizePx / 2, y - sizePx / 2, sizePx, sizePx);
-        return;
-      }
+    if (raster?.halfTurn && Math.abs(Math.abs(rotation) - Math.PI) < 0.00001) {
+      this.blitPreparedSprite(raster.halfTurn, x - size / 2, y - size / 2, size, true);
+      return;
     }
-
     this.ctx.save();
     this.ctx.translate(x, y);
     this.ctx.rotate(rotation);
-    this.ctx.drawImage(image, -sizePx / 2, -sizePx / 2, sizePx, sizePx);
+    this.blitPreparedSprite(source, -size / 2, -size / 2, size, Boolean(raster));
     this.ctx.restore();
   }
+
 }
 
 export { ENEMY, PATTERNS };

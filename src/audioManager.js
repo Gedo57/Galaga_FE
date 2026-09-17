@@ -18,6 +18,16 @@ const SFX_TRACKS = Object.freeze({
   bombBlast: '/assets/audio/sfx-bomb-blast.mp3'
 });
 
+// One fixed pool per sound. Event-specific poolSize is only a voice limit;
+// it must never produce another set of media elements during combat.
+const POOL_SIZES = Object.freeze({
+  touch: Object.freeze({ laser: 3, enemyFire: 3, enemyDestroy: 3, explosion: 2, waveStart: 1, waveClear: 1, bombBlast: 2, chargeUp: 2, diveFlyby: 2, coinSpend: 2 }),
+  safariDesktop: Object.freeze({ laser: 5, enemyFire: 4, enemyDestroy: 4, explosion: 3, waveStart: 1, waveClear: 1, bombBlast: 2, chargeUp: 2, diveFlyby: 3, coinSpend: 2 }),
+  other: Object.freeze({ laser: 8, enemyFire: 7, enemyDestroy: 6, explosion: 3, waveStart: 2, waveClear: 2, bombBlast: 3, chargeUp: 2, diveFlyby: 4, coinSpend: 2 })
+});
+const IMPORTANT_SFX = new Set(['explosion', 'bombBlast', 'chargeUp', 'waveStart', 'waveClear', 'coinSpend']);
+const SFX_READY_TIMEOUT_MS = 1500;
+
 const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
 
 function isSafariBrowser() {
@@ -55,8 +65,8 @@ class AudioManager {
     this.settings = loadSettings();
     this.unlocked = false;
     this.currentMusicKey = null;
-    // WebKit has a much higher cost for many simultaneous HTMLAudio decoders.
-    // Keep a bounded pool profile on touch Safari; Chrome/desktop behavior stays unchanged.
+    // Select pool sizes once. Safari also gets a total playback voice budget
+    // so combat cannot activate every preloaded media element simultaneously.
     this.safariTouch = isSafariTouchDevice();
     this.safariDesktop = isSafariDesktopDevice();
     this.safariOptimized = this.safariTouch || this.safariDesktop;
@@ -69,6 +79,10 @@ class AudioManager {
     }));
     this.sfxPools = new Map();
     this.lastSfxAt = new Map();
+    this.poolSizes = this.safariTouch ? POOL_SIZES.touch : this.safariDesktop ? POOL_SIZES.safariDesktop : POOL_SIZES.other;
+    this.voiceLimit = this.safariTouch ? 8 : this.safariDesktop ? 12 : Infinity;
+    this.activeVoices = 0;
+    this.prewarmPromise = null;
     this.applyMusicVolume();
   }
 
@@ -81,7 +95,6 @@ class AudioManager {
   }
 
   unlock() {
-    if (this.unlocked) return;
     this.unlocked = true;
     this.playCurrentMusic();
   }
@@ -107,14 +120,18 @@ class AudioManager {
     const node = this.music[this.currentMusicKey];
     if (!node) return;
     node.volume = this.settings.muted ? 0 : this.settings.musicVolume;
-    if (node.volume <= 0) return;
-    const result = node.play();
-    if (result?.catch) result.catch(() => {});
+    if (this.settings.muted || this.settings.musicVolume <= 0) { node.pause(); return; }
+    if (!node.paused) return;
+    try {
+      const result = node.play();
+      if (result?.catch) result.catch(() => {});
+    } catch {}
   }
 
   applyMusicVolume() {
     for (const node of Object.values(this.music)) {
       node.volume = this.settings.muted ? 0 : this.settings.musicVolume;
+      if (this.settings.muted || this.settings.musicVolume <= 0) node.pause();
     }
   }
 
@@ -122,6 +139,7 @@ class AudioManager {
     this.settings.muted = Boolean(value);
     this.persist();
     this.applyMusicVolume();
+    this.applySfxVolume();
     if (!this.settings.muted && this.unlocked) this.playCurrentMusic();
   }
 
@@ -140,101 +158,153 @@ class AudioManager {
   setSfxVolume(value) {
     this.settings.sfxVolume = clamp01(value);
     this.persist();
+    this.applySfxVolume();
   }
 
-  getPool(key, size = 6) {
-    const src = SFX_TRACKS[key];
-    if (!src) return [];
-    const poolKey = `${key}:${size}`;
-    if (!this.sfxPools.has(poolKey)) {
-      const nodes = Array.from({ length: size }, () => {
+  releaseVoice(voice) {
+    voice.token += 1;
+    if (!voice.busy) return;
+    voice.busy = false;
+    this.activeVoices = Math.max(0, this.activeVoices - 1);
+  }
+
+  applySfxVolume() {
+    for (const pool of this.sfxPools.values()) {
+      for (const voice of pool.voices) {
+        voice.node.volume = this.settings.muted ? 0 : clamp01(this.settings.sfxVolume * voice.gain);
+        if (this.settings.muted || this.settings.sfxVolume <= 0) {
+          voice.node.pause();
+          this.releaseVoice(voice);
+        }
+      }
+    }
+  }
+
+  getPool(key) {
+    // Read-only, including on cache misses. Allocation belongs to startup.
+    return this.sfxPools.get(key) || null;
+  }
+
+  prewarmGameplayPools() {
+    if (this.prewarmPromise) return this.prewarmPromise;
+    const nodes = [];
+    for (const [key, src] of Object.entries(SFX_TRACKS)) {
+      const voices = [];
+      for (let i = 0; i < this.poolSizes[key]; i += 1) {
         const node = new Audio(src);
         node.preload = 'auto';
         node.playsInline = true;
-        return node;
-      });
-      this.sfxPools.set(poolKey, { nodes, cursor: 0 });
+        const voice = { node, busy: false, token: 0, gain: 1 };
+        node.addEventListener('ended', () => { if (node.ended) this.releaseVoice(voice); });
+        node.addEventListener('pause', () => { if (node.paused) this.releaseVoice(voice); });
+        node.addEventListener('error', () => this.releaseVoice(voice));
+        voices.push(voice);
+        nodes.push(node);
+      }
+      this.sfxPools.set(key, { voices, cursor: 0 });
     }
-    return this.sfxPools.get(poolKey);
-  }
-
-
-  // Patch 4: construct the hot gameplay pools while the loading screen is still
-  // visible. This avoids first-use Audio element allocation during combat.
-  prewarmGameplayPools() {
-    if (this.safariTouch) {
-      // Patch 7 — 15 nodes instead of 31. High-frequency combat sounds are
-      // allowed to drop an overlapping voice rather than forcing Safari to
-      // maintain a large set of MP3 decoder/media-element pipelines.
-      this.getPool('laser', 3);
-      this.getPool('enemyFire', 3);
-      this.getPool('enemyDestroy', 3);
-      this.getPool('explosion', 2);
-      this.getPool('waveStart', 1);
-      this.getPool('waveClear', 1);
-      this.getPool('bombBlast', 2);
-      return;
-    }
-    if (this.safariDesktop) {
-      this.getPool('laser', 5);
-      this.getPool('enemyFire', 4);
-      this.getPool('enemyDestroy', 4);
-      this.getPool('explosion', 3);
-      this.getPool('waveStart', 1);
-      this.getPool('waveClear', 1);
-      this.getPool('bombBlast', 2);
-      return;
-    }
-    this.getPool('laser', 8);
-    this.getPool('enemyFire', 7);
-    this.getPool('enemyDestroy', 6);
-    this.getPool('explosion', 3);
-    this.getPool('waveStart', 2);
-    this.getPool('waveClear', 2);
-    this.getPool('bombBlast', 3);
+    this.applySfxVolume();
+    // iOS can defer media loading until a gesture. Wait only a bounded time;
+    // unfinished voices become eligible naturally once readyState advances.
+    this.prewarmPromise = new Promise((resolve) => {
+      let remaining = nodes.length;
+      let ready = 0;
+      let finished = false;
+      const cleanups = [];
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        for (const cleanup of cleanups) cleanup();
+        resolve({ total: nodes.length, ready, unavailable: nodes.length - ready });
+      };
+      const timer = window.setTimeout(finish, SFX_READY_TIMEOUT_MS);
+      for (const node of nodes) {
+        let settled = false;
+        const cleanup = () => {
+          node.removeEventListener('loadeddata', onReady);
+          node.removeEventListener('canplay', onReady);
+          node.removeEventListener('error', onError);
+        };
+        const settle = (ok) => {
+          if (settled || finished) return;
+          settled = true;
+          if (ok) ready += 1;
+          remaining -= 1;
+          cleanup();
+          if (!remaining) finish();
+        };
+        const onReady = () => { if (node.readyState >= 2) settle(true); };
+        const onError = () => settle(false);
+        cleanups.push(cleanup);
+        node.addEventListener('loadeddata', onReady);
+        node.addEventListener('canplay', onReady);
+        node.addEventListener('error', onError);
+        if (node.error) settle(false);
+        else if (node.readyState >= 2) settle(true);
+        else {
+          try { node.load(); } catch { settle(false); }
+          onReady();
+        }
+      }
+      if (!remaining) finish();
+    });
+    return this.prewarmPromise;
   }
 
   playSfx(key, options = {}) {
-    if (this.settings.muted || this.settings.sfxVolume <= 0 || !SFX_TRACKS[key]) return false;
+    if (!this.unlocked || this.settings.muted || this.settings.sfxVolume <= 0) return false;
+    const pool = this.getPool(key);
+    if (!pool?.voices.length) return false;
     const now = performance.now();
     const throttleMs = Math.max(0, Number(options.throttleMs || 0));
-    const last = Number(this.lastSfxAt.get(key) || 0);
-    if (throttleMs > 0 && now - last < throttleMs) return false;
-    this.lastSfxAt.set(key, now);
+    const last = this.lastSfxAt.get(key);
+    if (last !== undefined && throttleMs > 0 && now - last < throttleMs) return false;
+    const important = IMPORTANT_SFX.has(key) || options.priority === 'important';
+    if (this.safariOptimized && this.activeVoices >= this.voiceLimit - (important ? 0 : 2)) return false;
 
-    let requestedPoolSize = Math.max(1, Math.min(12, Number(options.poolSize || (key === 'laser' ? 8 : 4))));
-    if (this.safariTouch) {
-      const safariPoolCaps = { laser: 3, enemyFire: 3, enemyDestroy: 3, explosion: 2, chargeUp: 2, diveFlyby: 2, bombBlast: 2, waveStart: 1, waveClear: 1 };
-      requestedPoolSize = Math.min(requestedPoolSize, Number(safariPoolCaps[key] || 2));
-    } else if (this.safariDesktop) {
-      const safariDesktopPoolCaps = { laser: 5, enemyFire: 4, enemyDestroy: 4, explosion: 3, chargeUp: 2, diveFlyby: 3, bombBlast: 2, waveStart: 1, waveClear: 1 };
-      requestedPoolSize = Math.min(requestedPoolSize, Number(safariDesktopPoolCaps[key] || 3));
+    const requested = Number(options.poolSize || pool.voices.length);
+    const limit = Math.max(1, Math.min(pool.voices.length, Math.floor(requested) || 1));
+    let voice = null;
+    let index = 0;
+    for (let offset = 0; offset < limit; offset += 1) {
+      index = (pool.cursor + offset) % limit;
+      const candidate = pool.voices[index];
+      if (!candidate.busy && (candidate.node.paused || candidate.node.ended) && candidate.node.readyState >= 2 && !candidate.node.error) {
+        voice = candidate;
+        break;
+      }
     }
-    const pool = this.getPool(key, requestedPoolSize);
-    if (!pool?.nodes?.length) return false;
-
-    let node = pool.nodes[pool.cursor % pool.nodes.length];
-    if (this.safariOptimized) {
-      // Prefer an idle voice. If all voices are busy, drop this cosmetic sound
-      // rather than pause/seek an active HTMLAudio element, which is a known
-      // sustained-combat hotspot in WebKit.
-      const idleIndex = pool.nodes.findIndex((candidate) => candidate.paused || candidate.ended);
-      if (idleIndex < 0) return false;
-      node = pool.nodes[idleIndex];
-      pool.cursor = (idleIndex + 1) % pool.nodes.length;
-    } else {
-      pool.cursor = (pool.cursor + 1) % pool.nodes.length;
+    // Safari drops an overlapping cosmetic voice instead of seeking a busy
+    // media element. Other browsers retain their bounded round-robin behavior.
+    if (!voice && !this.safariOptimized) {
+      index = pool.cursor % limit;
+      const candidate = pool.voices[index];
+      if (candidate.node.readyState >= 2 && !candidate.node.error) {
+        candidate.node.pause();
+        this.releaseVoice(candidate);
+        voice = candidate;
+      }
     }
-
+    if (!voice) return false;
+    pool.cursor = (index + 1) % limit;
+    const node = voice.node;
+    const token = ++voice.token;
+    voice.busy = true; // Reserve before play() resolves; paused may still be true.
+    this.activeVoices += 1;
+    voice.gain = clamp01(options.volume ?? 1);
+    const failed = () => { if (voice.token === token) this.releaseVoice(voice); };
     try {
-      if (!node.paused) node.pause();
-      node.currentTime = 0;
-      node.playbackRate = Math.max(0.5, Math.min(2, Number(options.rate || 1)));
-      node.volume = clamp01(this.settings.sfxVolume * clamp01(options.volume ?? 1));
+      if (node.currentTime !== 0) node.currentTime = 0;
+      const rate = Math.max(0.5, Math.min(2, Number(options.rate || 1)));
+      if (node.playbackRate !== rate) node.playbackRate = rate;
+      node.volume = clamp01(this.settings.sfxVolume * voice.gain);
       const result = node.play();
-      if (result?.catch) result.catch(() => {});
+      if (result?.catch) result.catch(failed);
+      this.lastSfxAt.set(key, now);
       return true;
     } catch {
+      failed();
       return false;
     }
   }
