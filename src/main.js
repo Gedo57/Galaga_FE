@@ -957,10 +957,11 @@ function render() {
   audioManager.setMusicTrack(musicTrackForState(state));
   queueMicrotask(() => app.querySelector('.screen')?.classList.add('screen-ready'));
   if (state === GameState.WAVE_PLAYING) queueMicrotask(mountGameplayEngine);
-  if (state === GameState.CHECKPOINT) queueMicrotask(startCheckpointClock);
+  if (state === GameState.CHECKPOINT && !checkpointDecisionPending) queueMicrotask(startCheckpointClock);
 }
 function startCheckpointClock() {
   stopCheckpointClock();
+  if (checkpointDecisionPending) return;
   const cp = model.checkpoint || model.session?.checkpoint || {};
   const fallbackDeadline = Date.now() + DECISION_SECONDS * 1000;
   const deadline = Date.parse(cp.decisionDeadline || '') || fallbackDeadline;
