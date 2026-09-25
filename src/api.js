@@ -1,14 +1,17 @@
 import { API_URL, CLIENT_VERSION } from './config.js';
+import { ensurePlatformSession } from './platformSession.js';
 
 async function request(path, options = {}) {
   const controller = new AbortController();
-  const { timeoutMs: rawTimeoutMs, simpleJson = false, headers: optionHeaders = {}, ...fetchOptions } = options;
+  const { timeoutMs: rawTimeoutMs, simpleJson = false, headers: optionHeaders = {}, skipPlatform = false, ...fetchOptions } = options;
   const timeoutMs = Math.max(2000, Number(rawTimeoutMs || 9000));
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const platformToken = skipPlatform || path === '/api/health' ? null : await ensurePlatformSession(controller.signal);
+    const platformHeaders = platformToken ? { Authorization: `Bearer ${platformToken}` } : {};
     const headers = simpleJson
-      ? { 'Content-Type': 'text/plain;charset=UTF-8', ...optionHeaders }
-      : { 'Content-Type': 'application/json', 'X-Client-Version': CLIENT_VERSION, ...optionHeaders };
+      ? { 'Content-Type': 'text/plain;charset=UTF-8', ...platformHeaders, ...optionHeaders }
+      : { 'Content-Type': 'application/json', 'X-Client-Version': CLIENT_VERSION, ...platformHeaders, ...optionHeaders };
     const response = await fetch(`${API_URL}${path}`, {
       ...fetchOptions,
       headers,
