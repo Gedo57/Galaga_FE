@@ -397,8 +397,9 @@ let feedbackSerial = 0;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function money(value) { return new Intl.NumberFormat('en-US').format(Number(value || 0)); }
-function usesExternalWallet() { return model.player?.walletMode === 'SIDESIX' || model.session?.walletMode === 'SIDESIX'; }
-function walletDisplay() { return usesExternalWallet() ? 'SIDESIX' : money(model.player?.balance); }
+function walletMode() { return model.session?.walletMode || model.player?.walletMode || 'LOCAL'; }
+function walletBalanceIsOpaque() { return walletMode() === 'SIDESIX'; }
+function walletDisplay() { return walletMode() === 'SIDESIX' ? 'SIDESIX' : money(model.player?.balance); }
 function formatMultiplierValue(value) {
   const number = Number(value || 0);
   if (!Number.isFinite(number)) return '0';
@@ -413,7 +414,7 @@ function nextCheckpointAfter(wave, difficulty = activeDifficulty()) {
   return nextWave ? { wave: nextWave, multiplier: checkpointMultiplier(nextWave, difficulty), scoreGate: checkpointScoreGate(nextWave, difficulty) } : null;
 }
 function maxAffordableEntry() {
-  if (usesExternalWallet()) return ENTRY_MAX;
+  if (walletBalanceIsOpaque()) return ENTRY_MAX;
   const balance = Math.max(0, Number(model.player.balance || 0));
   return Math.min(ENTRY_MAX, Math.floor(balance / ENTRY_STEP) * ENTRY_STEP);
 }
@@ -720,7 +721,7 @@ function menuScreen() {
 function entryScreen() {
   const selectedDifficulty = DIFFICULTIES.find((d) => d.id === model.selectedDifficulty) || DIFFICULTIES[1];
   const maxEntry = maxAffordableEntry();
-  const canAfford = maxEntry >= ENTRY_MIN && model.selectedEntry >= ENTRY_MIN && (usesExternalWallet() || model.selectedEntry <= model.player.balance);
+  const canAfford = maxEntry >= ENTRY_MIN && model.selectedEntry >= ENTRY_MIN && (walletBalanceIsOpaque() || model.selectedEntry <= model.player.balance);
   const canDecrease = model.selectedEntry > ENTRY_MIN;
   const canIncrease = maxEntry >= ENTRY_MIN && model.selectedEntry + ENTRY_STEP <= maxEntry;
   return `<section class="screen entry-screen">${backgrounds('mainmenu')}${currencyBar()}
@@ -737,11 +738,11 @@ function entryScreen() {
         </label>
         <button class="entry-step-button plus" type="button" data-action="entry-plus" ${canIncrease ? '' : 'disabled'} aria-label="Increase entry by ${ENTRY_STEP}">+</button>
       </div>
-      <div class="entry-range-note"><span>MIN ${money(ENTRY_MIN)}</span><span>${usesExternalWallet() ? 'BALANCE CHECKED BY SIDESIX' : `AVAILABLE ${money(model.player.balance)}`}</span></div>
+      <div class="entry-range-note"><span>MIN ${money(ENTRY_MIN)}</span><span>${walletMode() === 'SIDESIX' ? 'BALANCE CHECKED BY SIDESIX' : `AVAILABLE ${money(model.player.balance)}`}</span></div>
       <div class="section-label"><span>DIFFICULTY</span><span>START MULTIPLIER</span></div>
       <div class="choice-grid difficulty">${DIFFICULTIES.map((diff) => `<button class="choice difficulty-choice ${diff.id === model.selectedDifficulty ? 'selected' : ''}" data-difficulty="${diff.id}"><strong>${diff.label}</strong><small>${diff.hint}</small></button>`).join('')}</div>
       <div class="entry-summary"><div class="coin-inline">${coinGlyph('summary-coin')}<span data-entry-summary>${money(model.selectedEntry)}</span></div><div class="diff-inline"><span>${selectedDifficulty?.label || 'MEDIUM'}</span><small data-difficulty-multiplier>${selectedDifficulty?.hint || 'START x2.25'}</small></div></div>
-      <div class="action-row"><button class="ui-button secondary" data-action="back-menu">BACK</button><button class="ui-button" data-action="start-run" ${(!canAfford || model.busy) ? 'disabled' : ''}>${model.busy ? 'CREATING SESSION…' : canAfford ? `START RUN • ${money(model.selectedEntry)}` : (usesExternalWallet() ? 'INVALID ENTRY' : 'INSUFFICIENT COINS')}</button></div>
+      <div class="action-row"><button class="ui-button secondary" data-action="back-menu">BACK</button><button class="ui-button" data-action="start-run" ${(!canAfford || model.busy) ? 'disabled' : ''}>${model.busy ? 'CREATING SESSION…' : canAfford ? `START RUN • ${money(model.selectedEntry)}` : (walletBalanceIsOpaque() ? 'INVALID ENTRY' : 'INSUFFICIENT COINS')}</button></div>
     </div>${model.error ? `<div class="toast">${escapeHtml(model.error)}</div>` : ''}</section>`;
 }
 function bombButtonMarkup(bombReady, { portrait = false } = {}) {
@@ -1131,7 +1132,7 @@ async function resumeActiveSession(session) {
 async function startRun() {
   if (model.busy) return;
   model.selectedEntry = normalizeEntry(model.selectedEntry);
-  if (!usesExternalWallet() && (model.player.balance < ENTRY_MIN || model.selectedEntry > model.player.balance)) {
+  if (!walletBalanceIsOpaque() && (model.player.balance < ENTRY_MIN || model.selectedEntry > model.player.balance)) {
     model.error = 'Insufficient coin balance'; render(); return;
   }
   model.busy = true; model.error = ''; render();
@@ -1338,10 +1339,10 @@ app.addEventListener('input', (event) => {
   const summary = app.querySelector('[data-entry-summary]');
   if (summary) summary.textContent = money(raw);
   const startButton = app.querySelector('[data-action="start-run"]');
-  const valid = raw >= ENTRY_MIN && (usesExternalWallet() || raw <= model.player.balance) && raw <= ENTRY_MAX && raw % ENTRY_STEP === 0;
+  const valid = raw >= ENTRY_MIN && (walletBalanceIsOpaque() || raw <= model.player.balance) && raw <= ENTRY_MAX && raw % ENTRY_STEP === 0;
   if (startButton && !model.busy) {
     startButton.disabled = !valid;
-    startButton.textContent = valid ? `START RUN • ${money(raw)}` : ((!usesExternalWallet() && raw > model.player.balance) ? 'INSUFFICIENT COINS' : `USE ${ENTRY_STEP}-COIN STEPS`);
+    startButton.textContent = valid ? `START RUN • ${money(raw)}` : ((!walletBalanceIsOpaque() && raw > model.player.balance) ? 'INSUFFICIENT COINS' : `USE ${ENTRY_STEP}-COIN STEPS`);
   }
 });
 app.addEventListener('change', (event) => {
