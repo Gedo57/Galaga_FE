@@ -1,13 +1,20 @@
 import { API_URL, CLIENT_VERSION } from './config.js';
 import { ensurePlatformSession } from './platformSession.js';
+import { waitForBackendReady } from './backendWake.js';
 
 async function request(path, options = {}) {
-  const controller = new AbortController();
   const { timeoutMs: rawTimeoutMs, simpleJson = false, headers: optionHeaders = {}, skipPlatform = false, ...fetchOptions } = options;
+  const isHealthRequest = path === '/api/health';
+
+  // Wake Render with safe GET retries before consuming a one-time Platform launch token
+  // or sending any gameplay mutation. The real request itself is never auto-retried.
+  if (!isHealthRequest) await waitForBackendReady(`${API_URL}/api/health`);
+
+  const platformToken = skipPlatform || isHealthRequest ? null : await ensurePlatformSession(fetchOptions.signal);
+  const controller = new AbortController();
   const timeoutMs = Math.max(2000, Number(rawTimeoutMs || 9000));
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const platformToken = skipPlatform || path === '/api/health' ? null : await ensurePlatformSession(controller.signal);
     const platformHeaders = platformToken ? { Authorization: `Bearer ${platformToken}` } : {};
     const headers = simpleJson
       ? { 'Content-Type': 'text/plain;charset=UTF-8', ...platformHeaders, ...optionHeaders }
