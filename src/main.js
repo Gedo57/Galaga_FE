@@ -202,6 +202,7 @@ let waveClearPending = false;
 let checkpointDecisionPending = false;
 let checkpointClock = null;
 let autoAdvanceToken = 0;
+let nextWavePending = false;
 let bombDoubleTapAt = 0;
 let bombDoubleTapTarget = null;
 const BOMB_DOUBLE_TAP_WINDOW_MS = 460;
@@ -1213,30 +1214,164 @@ async function runCountdown() {
   if (model.session?.id && !String(model.session.id).startsWith('dev-')) { const payload = await api.beginSession(model.session.id); applySessionToModel(payload.session); }
   machine.set(GameState.WAVE_PLAYING, { force: true });
 }
-async function advanceWave() {
-  if (!model.session?.id || String(model.session.id).startsWith('dev-')) { model.wave += 1; model.stats.waveElapsed = 0; machine.set(GameState.WAVE_PLAYING, { force: true }); return; }
-  try { const payload = await api.nextWave(model.session.id); applySessionToModel(payload.session); model.lastWaveResult = null; machine.set(GameState.WAVE_PLAYING, { force: true }); }
-  catch (error) { setError(error.message); }
+async function advanceWave({ token = autoAdvanceToken } = {}) {
+  if (nextWavePending) return false;
+  if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return false;
+
+  if (!model.session?.id || String(model.session.id).startsWith('dev-')) {
+    model.wave += 1;
+    model.stats.waveElapsed = 0;
+    model.lastWaveResult = null;
+    machine.set(GameState.WAVE_PLAYING, { force: true });
+    return true;
+  }
+
+  const sessionId = model.session.id;
+  nextWavePending = true;
+  try {
+    try {
+      const payload = await api.nextWave(sessionId);
+      if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return false;
+      const session = payload?.session;
+      if (session) applySessionToModel(session);
+
+      // next-wave is intentionally idempotent server-side. Any authoritative
+      // WAVE_PLAYING response is safe to resume: a duplicate request never
+      // increments the wave, while a lost first response returns the new wave.
+      if (session?.state === 'WAVE_PLAYING') {
+        model.lastWaveResult = null;
+        model.error = '';
+        machine.set(GameState.WAVE_PLAYING, { force: true });
+        return true;
+      }
+    } catch (error) {
+      console.warn('Automatic wave advance request failed:', error.message);
+      if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return false;
+    }
+
+    // A POST may have committed on the backend even when the browser lost the
+    // response or timed out. Read authority before retrying so Wave N can never
+    // be advanced twice and the UI cannot remain stranded on WAVE_CLEAR.
+    try {
+      const authoritative = await api.getSession(sessionId);
+      if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return false;
+      const session = authoritative?.session;
+      if (!session) return false;
+      applySessionToModel(session);
+      model.error = '';
+
+      if (session.state === 'WAVE_PLAYING') {
+        model.lastWaveResult = null;
+        machine.set(GameState.WAVE_PLAYING, { force: true });
+        return true;
+      }
+      if (session.state === 'CHECKPOINT') {
+        machine.set(GameState.CHECKPOINT, { force: true });
+        return true;
+      }
+      if (session.state === 'RESULT') {
+        machine.set(GameState.RESULT, { force: true });
+        return true;
+      }
+      if (session.state === 'BOSS_COMPLETE') {
+        machine.set(GameState.BOSS_COMPLETE, { force: true });
+        return true;
+      }
+      if (session.state === 'RUN_LOST') {
+        machine.set(GameState.RUN_LOST, { force: true });
+        return true;
+      }
+      // WAVE_CLEAR means the mutation really did not commit. The caller keeps a
+      // single retry loop alive with backoff until the server is reachable again.
+      return false;
+    } catch (recoveryError) {
+      console.warn('Automatic wave advance reconciliation failed:', recoveryError.message);
+      return false;
+    }
+  } finally {
+    nextWavePending = false;
+  }
 }
+
 async function continueCheckpoint() {
   if (checkpointDecisionPending) return;
-  checkpointDecisionPending = true; stopCheckpointClock(); model.error = ''; render();
+  checkpointDecisionPending = true;
+  stopCheckpointClock();
+  model.error = '';
+  render();
+
   const nextWave = Math.min(10, Number(model.wave || 1) + 1);
-  const nextAssetsReady = prepareGameplayWaveAssets(nextWave, { trim: true });
+  // Warm the next wave in the background. Gameplay mounting owns the actual
+  // readiness gate, so asset decode cannot block the authoritative transition.
+  void prepareGameplayWaveAssets(nextWave, { trim: false }).catch((error) => {
+    console.warn(`Wave ${nextWave} checkpoint warmup failed:`, error?.message || error);
+  });
+
   try {
     if (!model.session?.id || String(model.session.id).startsWith('dev-')) {
       if (model.wave >= 10) throw new Error('Run is already at the Final Boss');
-      await nextAssetsReady;
-      model.wave += 1; model.checkpoint = null; model.lastWaveResult = null; checkpointDecisionPending = false; machine.set(GameState.WAVE_PLAYING, { force: true }); return;
+      model.wave += 1;
+      model.checkpoint = null;
+      model.lastWaveResult = null;
+      checkpointDecisionPending = false;
+      machine.set(GameState.WAVE_PLAYING, { force: true });
+      return;
     }
-    const [payload] = await Promise.all([api.checkpointDecision(model.session.id, 'continue'), nextAssetsReady]);
-    if (payload.player) model.player = payload.player;
-    applySessionToModel(payload.session);
+
+    const sessionId = model.session.id;
+    try {
+      const payload = await api.checkpointDecision(sessionId, 'continue');
+      if (payload.player) model.player = payload.player;
+      applySessionToModel(payload.session);
+      checkpointDecisionPending = false;
+      if (payload.session.state === 'RESULT') {
+        machine.set(GameState.RESULT, { force: true });
+      } else if (payload.session.state === 'WAVE_PLAYING') {
+        model.lastWaveResult = null;
+        model.error = '';
+        machine.set(GameState.WAVE_PLAYING, { force: true });
+      } else {
+        // Unexpected authority is rendered as-is instead of forcing gameplay.
+        await reconcileAuthoritativeSession(sessionId, { source: 'checkpoint-continue', stopEngine: true });
+      }
+      return;
+    } catch (error) {
+      console.warn('Checkpoint continue request failed:', error.message);
+
+      // The continue mutation may already have committed even if its response
+      // was lost. Re-read server authority before surfacing an error or asking
+      // the player to click Continue a second time.
+      try {
+        const authoritative = await api.getSession(sessionId);
+        const session = authoritative?.session;
+        if (authoritative?.player) model.player = authoritative.player;
+        if (session) applySessionToModel(session);
+
+        if (session?.state === 'WAVE_PLAYING') {
+          model.lastWaveResult = null;
+          model.error = '';
+          checkpointDecisionPending = false;
+          machine.set(GameState.WAVE_PLAYING, { force: true });
+          return;
+        }
+        if (session?.state === 'RESULT') {
+          model.error = '';
+          checkpointDecisionPending = false;
+          machine.set(GameState.RESULT, { force: true });
+          return;
+        }
+      } catch (recoveryError) {
+        console.warn('Checkpoint continue reconciliation failed:', recoveryError.message);
+      }
+      throw error;
+    }
+  } catch (error) {
     checkpointDecisionPending = false;
-    if (payload.session.state === 'RESULT') machine.set(GameState.RESULT, { force: true });
-    else { model.lastWaveResult = null; machine.set(GameState.WAVE_PLAYING, { force: true }); }
-  } catch (error) { checkpointDecisionPending = false; model.error = error.message; render(); }
+    model.error = error.message;
+    render();
+  }
 }
+
 async function cashOut(mode = 'manual') {
   if (checkpointDecisionPending) return;
   checkpointDecisionPending = true; stopCheckpointClock(); model.error = ''; render();
@@ -1258,12 +1393,21 @@ async function cashOut(mode = 'manual') {
 }
 function scheduleAutoAdvance() {
   const token = ++autoAdvanceToken;
-  const nextAssetsReady = warmNextWaveAssets();
+
+  // Asset loading is only a warmup. It must never gate the authoritative state
+  // transition; mountGameplayEngine() will await the same cached job if needed.
+  void warmNextWaveAssets();
+
   setTimeout(async () => {
-    if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return;
-    await nextAssetsReady;
-    if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return;
-    await advanceWave();
+    let attempt = 0;
+    while (token === autoAdvanceToken && machine.state === GameState.WAVE_CLEAR) {
+      if (attempt > 0) await wait(Math.min(2500, 650 * attempt));
+      if (token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return;
+
+      const advanced = await advanceWave({ token });
+      if (advanced || token !== autoAdvanceToken || machine.state !== GameState.WAVE_CLEAR) return;
+      attempt += 1;
+    }
   }, 1450);
 }
 async function abandonRun() {
