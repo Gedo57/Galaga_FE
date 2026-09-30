@@ -489,7 +489,10 @@ export class CoreGameplayEngine {
       kills: Math.max(0, Number(start.kills ?? this.stats.kills)),
       shotsFired: Math.max(0, Number(start.shotsFired ?? this.stats.shotsFired)),
       shotsHit: Math.max(0, Number(start.shotsHit ?? this.stats.shotsHit)),
-      damageTaken: Math.max(0, Number(start.damageTaken ?? this.stats.damageTaken))
+      damageTaken: Math.max(0, Number(start.damageTaken ?? this.stats.damageTaken)),
+      killsByType: Object.fromEntries(Object.keys(ENEMY).map((type) => [type, Math.max(0, Number(start.killsByType?.[type] || 0))])),
+      bombKillsByType: Object.fromEntries(Object.keys(ENEMY).map((type) => [type, Math.max(0, Number(start.bombKillsByType?.[type] || 0))])),
+      dangerKillsByType: Object.fromEntries(Object.keys(ENEMY).map((type) => [type, Math.max(0, Number(start.dangerKillsByType?.[type] || 0))]))
     };
 
     this.playerBullets = [];
@@ -497,6 +500,7 @@ export class CoreGameplayEngine {
     this.effects = [];
     this.enemies = [];
     this.spawnFormation();
+    this.restoreAuthoritativeWaveState(options.initialState || {});
 
     this.patternDirector = new PatternDirector({
       difficulty: this.difficulty,
@@ -985,6 +989,66 @@ export class CoreGameplayEngine {
       for (const enemy of this.enemies) {
         this.effects.push({ x: enemy.x, y: enemy.y, age: 0, duration: ['miniBoss', 'finalBoss'].includes(enemy.type) ? 0.65 : 0.38, kind: 'spawn' });
       }
+    }
+  }
+
+
+  restoreAuthoritativeWaveState(initialState = {}) {
+    // A remount/resume must represent the server's cumulative state, not a fresh
+    // copy of the wave. Recreating all formation slots while retaining cumulative
+    // kill counters lets already-defeated enemies be killed twice and correctly
+    // trips the server's per-wave kill caps. Restore those defeated slots silently.
+    const defeatedByType = {};
+    for (const type of Object.keys(ENEMY)) {
+      defeatedByType[type] = Math.max(
+        0,
+        Math.floor(Number(initialState.killsByType?.[type] || 0)) - Math.floor(Number(this.waveStart.killsByType?.[type] || 0))
+      );
+    }
+
+    for (const type of Object.keys(ENEMY)) {
+      let remaining = defeatedByType[type];
+      if (remaining <= 0) continue;
+      for (const enemy of this.enemies) {
+        if (remaining <= 0) break;
+        if (enemy.type !== type || !enemy.alive) continue;
+        enemy.alive = false;
+        enemy.mode = 'dead';
+        enemy.hp = 0;
+        enemy.spawnAge = Math.max(0, Number(enemy.spawnDuration || 0));
+        remaining -= 1;
+      }
+    }
+
+    const restoreBoss = (type, hpKey) => {
+      const boss = this.enemies.find((enemy) => enemy.type === type);
+      if (!boss) return;
+      const expectedMax = combatHpForDifficulty(type, this.difficulty);
+      // Difficulty tuning is the canonical HP schema. Older server builds could
+      // persist an undersized max (notably Hard Final Boss 500 vs 520); never
+      // carry that stale schema forward during a resume.
+      boss.maxHp = Math.max(1, expectedMax);
+      const wasDefeated = defeatedByType[type] > 0;
+      if (wasDefeated) {
+        boss.alive = false;
+        boss.mode = 'dead';
+        boss.hp = 0;
+        return;
+      }
+      const savedHp = Number(initialState[hpKey]);
+      if (Number.isFinite(savedHp) && savedHp > 0) boss.hp = clamp(savedHp, 1, boss.maxHp);
+      else boss.hp = boss.maxHp;
+      boss.bossPhase = type === 'miniBoss' ? this.miniBossPhase(boss) : this.finalBossPhase(boss);
+    };
+
+    restoreBoss('miniBoss', 'miniBossHp');
+    restoreBoss('finalBoss', 'finalBossHp');
+
+    // Spawn VFX for slots that were already dead would visually imply a respawn.
+    // Remove those cosmetic entries; gameplay state is otherwise untouched.
+    if (this.effects.length) {
+      const livePositions = new Set(this.enemies.filter((enemy) => enemy.alive).map((enemy) => `${enemy.x}:${enemy.y}`));
+      this.effects = this.effects.filter((effect) => effect.kind !== 'spawn' || livePositions.has(`${effect.x}:${effect.y}`));
     }
   }
 

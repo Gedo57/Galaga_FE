@@ -1012,6 +1012,37 @@ function updateGameplayHud(snapshot) {
   const bombButton = app.querySelector('[data-action="bomb"]');
   if (bombButton) { const ready = Boolean(snapshot.bombAvailable); bombButton.disabled = !ready; bombButton.classList.toggle('spent', !ready); const label = bombButton.querySelector('span'); if (label) label.textContent = ready ? 'BOMB • 1' : 'BOMB • USED'; }
 }
+async function reconcileAuthoritativeSession(sessionId, { source = 'gameplay-sync', stopEngine = true } = {}) {
+  if (!sessionId || String(sessionId).startsWith('dev-')) return null;
+  if (stopEngine) stopGameplayEngine();
+  const authoritative = await api.getSession(sessionId);
+  const session = authoritative?.session;
+  if (!session) throw new Error('Authoritative session was unavailable');
+  applySessionToModel(session);
+  model.error = '';
+  console.info(`Authoritative gameplay reconciliation: ${source}`, { sessionId, state: session.state, wave: session.wave });
+
+  if (session.state === 'WAVE_PLAYING') {
+    machine.set(GameState.WAVE_PLAYING, { force: true });
+  } else if (session.state === 'WAVE_CLEAR') {
+    machine.set(GameState.WAVE_CLEAR, { force: true });
+    scheduleAutoAdvance();
+  } else if (session.state === 'CHECKPOINT') {
+    machine.set(GameState.CHECKPOINT, { force: true });
+  } else if (session.state === 'RESULT') {
+    machine.set(GameState.RESULT, { force: true });
+  } else if (session.state === 'BOSS_COMPLETE') {
+    machine.set(GameState.BOSS_COMPLETE, { force: true });
+  } else if (session.state === 'RUN_LOST') {
+    machine.set(GameState.RUN_LOST, { force: true });
+  } else if (session.state === 'COUNTDOWN') {
+    machine.set(GameState.COUNTDOWN, { force: true });
+  } else if (session.state === 'ENTRY_PAID') {
+    machine.set(GameState.ENTRY_PAID, { force: true });
+  }
+  return session;
+}
+
 async function persistCoreSnapshot(snapshot, meta = {}) {
   updateGameplayHud(snapshot);
   const reason = String(meta?.reason || 'periodic');
@@ -1021,22 +1052,20 @@ async function persistCoreSnapshot(snapshot, meta = {}) {
   snapshotBusy = true;
   const sessionId = model.session.id;
   try {
-    // Patch 5: periodic state sync is intentionally sparse. Important terminal
-    // transitions use their dedicated endpoints; bomb is the only in-wave
-    // action that requests an immediate core-state flush.
+    // Periodic state sync stays sparse. Terminal transitions use their dedicated
+    // endpoints; bomb is the only in-wave action requesting an immediate flush.
     const payload = await api.saveCoreState(sessionId, snapshot, { reason });
     if (model.session?.id === sessionId && machine.state === GameState.WAVE_PLAYING) model.session = payload.session;
   } catch (error) {
     // A late periodic/bomb response can race a legitimate wave transition.
-    // 409 in that case is stale network work, not a gameplay failure.
     if (error?.status === 409 && (waveClearPending || machine.state !== GameState.WAVE_PLAYING)) return;
-    console.warn('Core-state sync failed:', error.message);
+    console.warn('Core-state sync failed:', error.message, error?.payload?.validation || '');
     if (error?.status === 422 && model.session?.id === sessionId && machine.state === GameState.WAVE_PLAYING) {
       try {
-        const authoritative = await api.getSession(sessionId);
-        applySessionToModel(authoritative.session);
-        model.error = 'Gameplay state was rejected by server validation and has been resynced.';
-        machine.set(GameState.WAVE_PLAYING, { force: true });
+        // Validation rejection is recovered silently from server authority. Do not
+        // expose anti-cheat/validation internals to the player and do not keep the
+        // rejected runtime alive while reconciliation is in flight.
+        await reconcileAuthoritativeSession(sessionId, { source: `core-state:${reason}`, stopEngine: true });
       } catch (recoveryError) {
         console.warn('Authoritative resync failed:', recoveryError.message);
       }
@@ -1046,19 +1075,38 @@ async function persistCoreSnapshot(snapshot, meta = {}) {
 async function handleRunLost(snapshot) {
   if (runLostPending) return;
   runLostPending = true; waveClearPending = false; updateGameplayHud(snapshot);
+  const sessionId = model.session?.id;
+  let settledLocally = !sessionId || String(sessionId).startsWith('dev-');
   try {
-    if (model.session?.id && !String(model.session.id).startsWith('dev-')) {
-      const payload = await api.loseSession(model.session.id, snapshot); model.player = payload.player; applySessionToModel(payload.session);
+    if (!settledLocally) {
+      const payload = await api.loseSession(sessionId, snapshot);
+      model.player = payload.player;
+      applySessionToModel(payload.session);
+      settledLocally = true;
     }
-  } catch (error) { console.warn('Run-lost sync failed:', error.message); }
-  finally { runLostPending = false; machine.set(GameState.RUN_LOST, { force: true }); }
+  } catch (error) {
+    console.warn('Run-lost sync failed:', error.message, error?.payload?.validation || '');
+    if (error?.status === 422 || error?.status === 409) {
+      try {
+        await reconcileAuthoritativeSession(sessionId, { source: 'run-lost', stopEngine: true });
+        return;
+      } catch (recoveryError) {
+        console.warn('Run-lost authoritative reconciliation failed:', recoveryError.message);
+      }
+    }
+    model.error = error.message;
+  } finally {
+    runLostPending = false;
+    if (settledLocally) machine.set(GameState.RUN_LOST, { force: true });
+  }
 }
 async function handleWaveClear(snapshot) {
   if (waveClearPending) return;
   waveClearPending = true; stopGameplayEngine(); updateGameplayHud(snapshot);
+  const sessionId = model.session?.id;
   try {
-    if (model.session?.id && !String(model.session.id).startsWith('dev-')) {
-      const payload = await api.clearWave(model.session.id, snapshot); applySessionToModel(payload.session); model.lastWaveResult = payload.waveResult; model.checkpoint = payload.checkpoint;
+    if (sessionId && !String(sessionId).startsWith('dev-')) {
+      const payload = await api.clearWave(sessionId, snapshot); applySessionToModel(payload.session); model.lastWaveResult = payload.waveResult; model.checkpoint = payload.checkpoint;
       if (payload.session.state === 'CHECKPOINT') machine.set(GameState.CHECKPOINT, { force: true });
       else if (payload.session.state === 'BOSS_COMPLETE') { if (payload.player) model.player = payload.player; machine.set(GameState.BOSS_COMPLETE, { force: true }); }
       else { machine.set(GameState.WAVE_CLEAR, { force: true }); scheduleAutoAdvance(); }
@@ -1070,8 +1118,19 @@ async function handleWaveClear(snapshot) {
     if (Number(snapshot.wave ?? model.wave) < 10 && machine.state !== GameState.BOSS_COMPLETE) {
       audioManager.playSfx('waveClear', { volume: 0.62, rate: 1, throttleMs: 800, poolSize: 2 });
     }
-  } catch (error) { model.error = error.message; machine.set(GameState.WAVE_PLAYING, { force: true }); }
-  finally { waveClearPending = false; }
+  } catch (error) {
+    console.warn('Wave-clear sync failed:', error.message, error?.payload?.validation || '');
+    if ((error?.status === 422 || error?.status === 409) && sessionId && !String(sessionId).startsWith('dev-')) {
+      try {
+        await reconcileAuthoritativeSession(sessionId, { source: 'wave-clear', stopEngine: true });
+        return;
+      } catch (recoveryError) {
+        console.warn('Wave-clear authoritative reconciliation failed:', recoveryError.message);
+      }
+    }
+    model.error = error.message;
+    machine.set(GameState.WAVE_PLAYING, { force: true });
+  } finally { waveClearPending = false; }
 }
 async function mountGameplayEngine() {
   if (machine.state !== GameState.WAVE_PLAYING || activeEngine) return;
@@ -1094,10 +1153,14 @@ async function mountGameplayEngine() {
       wave: model.wave, score: model.session?.score ?? model.score, lives: model.session?.lives ?? model.lives,
       kills: core.kills ?? model.stats.kills, shotsFired: core.shotsFired ?? model.stats.shotsFired, shotsHit: core.shotsHit ?? model.stats.shotsHit,
       damageTaken: core.damageTaken ?? model.stats.damageTaken, killsByType: core.killsByType ?? model.stats.killsByType,
+      dangerKillsByType: core.dangerKillsByType ?? model.stats.dangerKillsByType,
       patternActivations: core.patternActivations ?? model.stats.patternActivations, lastPattern: core.lastPattern ?? model.stats.lastPattern,
       bombKillsByType: core.bombKillsByType ?? model.stats.bombKillsByType,
       comboIndex: core.comboIndex || 0, comboTimer: core.comboTimer || 0, overdriveEnergy: core.overdriveEnergy || 0, overdriveActiveRemaining: core.overdriveActiveRemaining || 0,
       bombAvailable: core.bombAvailable ?? !core.bombUsed, bombUsed: core.bombUsed || false, waveElapsed: core.waveElapsed || 0,
+      lastStandActive: Boolean(core.lastStandActive), recoveryTimer: core.recoveryTimer || 0,
+      miniBossHp: core.miniBossHp ?? 0, miniBossMaxHp: core.miniBossMaxHp ?? 0, miniBossPhase: core.miniBossPhase ?? 0,
+      finalBossHp: core.finalBossHp ?? 0, finalBossMaxHp: core.finalBossMaxHp ?? 0, finalBossPhase: core.finalBossPhase ?? 0,
       waveStart: model.session?.waveState?.startCore || undefined
     },
     seed: model.session?.gameSeed || 'dev-phase-8', sessionId: model.session?.id,
