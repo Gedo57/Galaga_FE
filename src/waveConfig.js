@@ -302,7 +302,7 @@ export const WAVES = Object.freeze({
   9: {
     id: 9, label: 'ELITE ASSAULT', enemyCount: 22, patternBudget: 16,
     mix: { fighter: 4, diver: 4, shooter: 4, heavy: 4, charger: 3, elite: 3 }, formation: FORMATION_TEMPLATES[9],
-    allowedPatterns: ['eliteAssault', 'crossfire', 'pincer', 'charge', 'spiral'], signaturePattern: 'eliteAssault', patternWeights: { eliteAssault: 0.50, crossfire: 0.15, pincer: 0.12, charge: 0.13, spiral: 0.10 }, fireTokens: 2,
+    allowedPatterns: ['eliteAssault', 'crossfire', 'pincer', 'charge', 'spiral'], signaturePattern: 'eliteAssault', patternWeights: { eliteAssault: 0.50, crossfire: 0.15, pincer: 0.12, charge: 0.13, spiral: 0.10 }, fireTokens: 2, checkpoint: true,
     scoreGate: SCORE_GATES[9], multiplier: CHECKPOINT_MULTIPLIERS[9], timeCap: 40
   },
   10: {

@@ -11,7 +11,8 @@ const app = document.querySelector('#app');
 const machine = new StateMachine(GameState.MENU);
 const DECISION_SECONDS = 8;
 const REWARD_TIER_WAVES = Object.freeze([3, 5, 7, 9, 10]);
-const CASHOUT_WAVES = Object.freeze([5, 10]);
+const MANUAL_CASHOUT_WAVES = Object.freeze([5, 9]);
+const PAYOUT_OPPORTUNITY_WAVES = Object.freeze([5, 9, 10]);
 
 const AUDIO_GAMEPLAY_STATES = new Set([
   GameState.COUNTDOWN,
@@ -410,8 +411,11 @@ function activeDifficulty() { return model.session?.difficulty || model.selected
 function runStartMultiplier(difficulty = activeDifficulty()) { return startMultiplierForDifficulty(difficulty); }
 function checkpointMultiplier(wave, difficulty = activeDifficulty()) { return checkpointMultiplierForDifficulty(wave, difficulty); }
 function checkpointScoreGate(wave, difficulty = activeDifficulty()) { return scoreGateForDifficulty(wave, difficulty); }
-function nextCheckpointAfter(wave, difficulty = activeDifficulty()) {
-  const nextWave = CASHOUT_WAVES.find((candidate) => candidate > Number(wave || 0));
+function isManualCashoutWave(wave) {
+  return MANUAL_CASHOUT_WAVES.includes(Number(wave));
+}
+function nextPayoutOpportunityAfter(wave, difficulty = activeDifficulty()) {
+  const nextWave = PAYOUT_OPPORTUNITY_WAVES.find((candidate) => candidate > Number(wave || 0));
   return nextWave ? { wave: nextWave, multiplier: checkpointMultiplier(nextWave, difficulty), scoreGate: checkpointScoreGate(nextWave, difficulty) } : null;
 }
 function maxAffordableEntry() {
@@ -846,7 +850,7 @@ function checkpointScreen() {
   const startMultiplier = runStartMultiplier();
   const currentMultiplier = Number(cp.bestUnlockedMultiplier || (unlocked ? currentTierMultiplier : startMultiplier));
   const currentReward = Number(cp.currentReward ?? Math.round(entry * currentMultiplier));
-  const next = nextCheckpointAfter(model.wave) || {};
+  const next = nextPayoutOpportunityAfter(model.wave) || {};
   const nextMultiplier = Number(cp.nextMultiplier || next.multiplier || 0);
   const nextReward = Number(cp.nextReward ?? (nextMultiplier ? Math.round(entry * nextMultiplier) : 0));
   const nextTargetWave = Number(cp.nextCheckpointWave || next.wave || 0);
@@ -863,7 +867,7 @@ function checkpointScreen() {
         <div class="cashout-card next"><span>${nextTargetLabel}</span><strong>${nextReward ? `${money(nextReward)} COINS` : '—'}</strong><em>${nextMultiplier ? `x${nextMultiplier.toFixed(2)} • SCORE ${money(cp.nextScoreGate || next.scoreGate)}` : 'FINAL TIER'}</em></div>
       </div>
       <div class="checkpoint-strip"><div><span>RATING</span><strong>${rating}</strong></div><div><span>ENTRY</span><strong>${money(entry)}</strong></div><div><span>LIVES</span><strong>${model.lives}</strong></div></div>
-      <p class="info-copy decision-copy">Cash Out is available only after the Mini Boss. Continue commits the run through Waves 6–10 with no further manual cashout. Defeating the Final Boss settles the final payout automatically using the best score-gated reward tier reached. Timer expiry requests Auto Cash Out.</p>
+      <p class="info-copy decision-copy">${model.wave === 5 ? 'Cash Out is available now and again after Wave 9. Continue advances to Wave 6. Waves 6–8 continue without a cashout decision. Defeating the Final Boss on Wave 10 settles the final payout automatically.' : 'This is the final manual Cash Out decision. Continue advances to Wave 10 and the Final Boss. Defeating the Final Boss settles the final payout automatically.'} Timer expiry requests Auto Cash Out.</p>
       <div class="checkpoint-actions"><button class="ui-button secondary cashout-button" data-action="cashout" ${checkpointDecisionPending ? 'disabled' : ''}>${checkpointDecisionPending ? 'SETTLING…' : `CASH OUT • ${money(currentReward)}`}</button>
       ${canContinue ? `<button class="ui-button" data-action="continue-wave" ${checkpointDecisionPending ? 'disabled' : ''}>CONTINUE TO WAVE ${model.wave + 1}</button>` : '<button class="ui-button" disabled>FINAL RUN COMPLETE</button>'}</div>
       <button class="text-danger-button" data-action="abandon">ABANDON RUN • REWARD 0</button>
@@ -1113,7 +1117,7 @@ async function handleWaveClear(snapshot) {
       else { machine.set(GameState.WAVE_CLEAR, { force: true }); scheduleAutoAdvance(); }
     } else {
       model.lastWaveResult = snapshot.waveResult; model.score = snapshot.score;
-      if (model.wave === 5) { model.checkpoint = makeDevCheckpoint(model.wave); machine.set(GameState.CHECKPOINT, { force: true }); }
+      if (isManualCashoutWave(model.wave)) { model.checkpoint = makeDevCheckpoint(model.wave); machine.set(GameState.CHECKPOINT, { force: true }); }
       else { machine.set(GameState.WAVE_CLEAR, { force: true }); scheduleAutoAdvance(); }
     }
     if (Number(snapshot.wave ?? model.wave) < 10 && machine.state !== GameState.BOSS_COMPLETE) {
@@ -1443,7 +1447,7 @@ function makeDevCheckpoint(wave) {
       bestUnlockedWave = checkpointWave;
     }
   }
-  const next = nextCheckpointAfter(wave, difficulty) || {};
+  const next = nextPayoutOpportunityAfter(wave, difficulty) || {};
   return {
     wave, scoreGate: gate, multiplier, scoreUnlocked: unlocked, bestUnlockedWave, bestUnlockedMultiplier: bestMultiplier,
     payoutSource: bestUnlockedWave ? 'checkpoint' : 'start', startMultiplier: runStartMultiplier(difficulty),
@@ -1462,7 +1466,10 @@ function devPreviewFromQuery() {
   const map = { menu: GameState.MENU, entry: GameState.ENTRY_SELECTED, gameplay: GameState.WAVE_PLAYING, clear: GameState.WAVE_CLEAR, checkpoint: GameState.CHECKPOINT, result: GameState.RESULT, lost: GameState.RUN_LOST, boss: GameState.BOSS_COMPLETE };
   const state = map[q.toLowerCase()]; if (!state) return false;
   model.session = { id: 'dev-preview', difficulty: model.selectedDifficulty, entryAmount: model.selectedEntry, score: model.score, lives: 3, gameSeed: 'dev-phase-8', wave, coreState: { ...emptyStats() }, waveState: { startCore: { score: 0, kills: 0, shotsFired: 0, shotsHit: 0, damageTaken: 0 }, lastResult: model.lastWaveResult } };
-  if (state === GameState.CHECKPOINT) { model.checkpoint = makeDevCheckpoint(wave); model.session.checkpoint = model.checkpoint; }
+  if (state === GameState.CHECKPOINT) {
+    if (!isManualCashoutWave(wave)) return false;
+    model.checkpoint = makeDevCheckpoint(wave); model.session.checkpoint = model.checkpoint;
+  }
   if (state === GameState.BOSS_COMPLETE) {
     const multiplier = Number(params.get('multiplier') || checkpointMultiplier(10, model.selectedDifficulty)); const reward = Math.round(model.selectedEntry * multiplier);
     model.player.balance = 5000 - model.selectedEntry + reward; model.session.cashout = { wave: 10, multiplier, reward, entryAmount: model.selectedEntry, netProfit: reward - model.selectedEntry, mode: 'boss_complete', score: model.score }; model.session.reward = reward; model.session.state = 'BOSS_COMPLETE';
