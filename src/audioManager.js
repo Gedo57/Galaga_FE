@@ -77,6 +77,12 @@ class AudioManager {
       node.playsInline = true;
       return [key, node];
     }));
+    // iOS Safari does not reliably apply HTMLMediaElement.volume. Route music
+    // through Web Audio after the first user gesture so the settings slider can
+    // control a real GainNode. Keep media-element volume as a desktop fallback.
+    this.audioContext = null;
+    this.musicGain = null;
+    this.musicSources = new Map();
     this.sfxPools = new Map();
     this.lastSfxAt = new Map();
     this.poolSizes = this.safariTouch ? POOL_SIZES.touch : this.safariDesktop ? POOL_SIZES.safariDesktop : POOL_SIZES.other;
@@ -94,8 +100,40 @@ class AudioManager {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings)); } catch {}
   }
 
+  ensureMusicGain() {
+    if (this.musicGain) return true;
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return false;
+    try {
+      const context = new AudioContextCtor();
+      const gain = context.createGain();
+      gain.connect(context.destination);
+      for (const [key, node] of Object.entries(this.music)) {
+        const source = context.createMediaElementSource(node);
+        source.connect(gain);
+        this.musicSources.set(key, source);
+      }
+      this.audioContext = context;
+      this.musicGain = gain;
+      this.applyMusicVolume();
+      return true;
+    } catch {
+      this.audioContext = null;
+      this.musicGain = null;
+      this.musicSources.clear();
+      return false;
+    }
+  }
+
   unlock() {
     this.unlocked = true;
+    this.ensureMusicGain();
+    if (this.audioContext?.state === 'suspended') {
+      try {
+        const resumed = this.audioContext.resume();
+        if (resumed?.catch) resumed.catch(() => {});
+      } catch {}
+    }
     this.playCurrentMusic();
   }
 
@@ -119,7 +157,10 @@ class AudioManager {
     if (!this.currentMusicKey) return;
     const node = this.music[this.currentMusicKey];
     if (!node) return;
-    node.volume = this.settings.muted ? 0 : this.settings.musicVolume;
+    const effectiveVolume = this.settings.muted ? 0 : this.settings.musicVolume;
+    // Once routed through Web Audio, leave the media element at unity and let
+    // the GainNode own volume. This is what makes the slider work on iOS.
+    node.volume = this.musicGain ? 1 : effectiveVolume;
     if (this.settings.muted || this.settings.musicVolume <= 0) { node.pause(); return; }
     if (!node.paused) return;
     try {
@@ -129,8 +170,18 @@ class AudioManager {
   }
 
   applyMusicVolume() {
+    const effectiveVolume = this.settings.muted ? 0 : this.settings.musicVolume;
+    if (this.musicGain) {
+      try {
+        const now = this.audioContext?.currentTime || 0;
+        this.musicGain.gain.cancelScheduledValues(now);
+        this.musicGain.gain.setValueAtTime(effectiveVolume, now);
+      } catch {
+        this.musicGain.gain.value = effectiveVolume;
+      }
+    }
     for (const node of Object.values(this.music)) {
-      node.volume = this.settings.muted ? 0 : this.settings.musicVolume;
+      node.volume = this.musicGain ? 1 : effectiveVolume;
       if (this.settings.muted || this.settings.musicVolume <= 0) node.pause();
     }
   }
