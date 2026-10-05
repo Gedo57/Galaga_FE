@@ -16,26 +16,24 @@ const RECOVERY_AFTER_ATTACK = Object.freeze({ pincer: 0.30, charge: 0.34, crossf
 
 const ENEMY = Object.freeze({
   // Class identity stays stable across difficulties; HP scaling is applied by
-  // combatHpForDifficulty() so Easy/Medium/Hard feel materially different.
-  fighter: { score: 100, hitScaleX: 0.58, hitScaleY: 0.54, size: 1.0, hp: 1, role: 'line', driftX: 0.026, driftY: 0.007, driftSpeed: 1.00 },
-  diver: { score: 150, hitScaleX: 0.56, hitScaleY: 0.52, size: 1.03, hp: 1, role: 'dive', driftX: 0.038, driftY: 0.011, driftSpeed: 1.08 },
-  shooter: { score: 200, hitScaleX: 0.60, hitScaleY: 0.56, size: 1.06, hp: 1, role: 'ranged', driftX: 0.017, driftY: 0.005, driftSpeed: 0.82 },
-  heavy: { score: 300, hitScaleX: 0.64, hitScaleY: 0.58, size: 1.16, hp: 3, role: 'anchor', driftX: 0.011, driftY: 0.004, driftSpeed: 0.64 },
+  // combatHpForDifficulty(). Fallback HP mirrors the Medium balance profile.
+  fighter: { score: 100, hitScaleX: 0.58, hitScaleY: 0.54, size: 1.0, hp: 2, role: 'line', driftX: 0.026, driftY: 0.007, driftSpeed: 1.00 },
+  diver: { score: 150, hitScaleX: 0.56, hitScaleY: 0.52, size: 1.03, hp: 2, role: 'dive', driftX: 0.038, driftY: 0.011, driftSpeed: 1.08 },
+  shooter: { score: 200, hitScaleX: 0.60, hitScaleY: 0.56, size: 1.06, hp: 2, role: 'ranged', driftX: 0.017, driftY: 0.005, driftSpeed: 0.82 },
+  heavy: { score: 300, hitScaleX: 0.64, hitScaleY: 0.58, size: 1.16, hp: 4, role: 'anchor', driftX: 0.011, driftY: 0.004, driftSpeed: 0.64 },
   charger: { score: 300, hitScaleX: 0.56, hitScaleY: 0.55, size: 1.08, hp: 2, role: 'flanker', driftX: 0.023, driftY: 0.008, driftSpeed: 0.95 },
   elite: { score: 500, hitScaleX: 0.62, hitScaleY: 0.57, size: 1.18, hp: 4, role: 'ace', driftX: 0.034, driftY: 0.011, driftSpeed: 1.12 },
-  miniBoss: { score: 1000, hitScaleX: 0.62, hitScaleY: 0.58, size: 2.05, hp: 110, role: 'boss' },
-  finalBoss: { score: 5000, hitScaleX: 0.63, hitScaleY: 0.60, size: 2.42, hp: 220, role: 'boss' }
+  miniBoss: { score: 1000, hitScaleX: 0.62, hitScaleY: 0.58, size: 2.05, hp: 90, role: 'boss' },
+  finalBoss: { score: 5000, hitScaleX: 0.63, hitScaleY: 0.60, size: 2.42, hp: 180, role: 'boss' }
 });
 
-// Difficulty Combat Rebuild — HP identity.
-// Patch 7 shifts the durability ladder upward: line ships now take 2 / 3 / 4
-// player shots on Easy / Medium / Hard, while specialists retain extra durability.
+// HP & Difficulty Balance Adjustment — canonical hits-to-kill values.
+// Each standard player projectile deals 1 HP damage, so these values map
+// directly to the requested number of hits for each difficulty.
 export const DIFFICULTY_ENEMY_HP = Object.freeze({
-  // Patch 7: the whole ladder is intentionally shifted upward.
-  // EASY = Medium+, MEDIUM = Hard, HARD = Extreme.
-  easy: Object.freeze({ fighter: 2, diver: 2, shooter: 2, charger: 3, heavy: 4, elite: 5, miniBoss: 120, finalBoss: 250 }),
-  medium: Object.freeze({ fighter: 3, diver: 3, shooter: 3, charger: 4, heavy: 5, elite: 6, miniBoss: 180, finalBoss: 360 }),
-  hard: Object.freeze({ fighter: 4, diver: 4, shooter: 4, charger: 5, heavy: 7, elite: 8, miniBoss: 260, finalBoss: 520 })
+  easy: Object.freeze({ fighter: 1, diver: 1, shooter: 1, charger: 1, heavy: 4, elite: 3, miniBoss: 60, finalBoss: 125 }),
+  medium: Object.freeze({ fighter: 2, diver: 2, shooter: 2, charger: 2, heavy: 4, elite: 4, miniBoss: 90, finalBoss: 180 }),
+  hard: Object.freeze({ fighter: 3, diver: 3, shooter: 3, charger: 3, heavy: 4, elite: 5, miniBoss: 130, finalBoss: 260 })
 });
 
 export function combatHpForDifficulty(type, difficulty = 'medium') {
@@ -1024,9 +1022,8 @@ export class CoreGameplayEngine {
       const boss = this.enemies.find((enemy) => enemy.type === type);
       if (!boss) return;
       const expectedMax = combatHpForDifficulty(type, this.difficulty);
-      // Difficulty tuning is the canonical HP schema. Older server builds could
-      // persist an undersized max (notably Hard Final Boss 500 vs 520); never
-      // carry that stale schema forward during a resume.
+      // Difficulty tuning is the canonical HP schema; never carry a stale
+      // boss max-HP value forward during a resume.
       boss.maxHp = Math.max(1, expectedMax);
       const wasDefeated = defeatedByType[type] > 0;
       if (wasDefeated) {
