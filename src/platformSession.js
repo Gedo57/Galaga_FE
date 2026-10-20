@@ -20,9 +20,30 @@ function consumePlatformFragment() {
   return context;
 }
 
-const platformLaunch = consumePlatformFragment();
+function consumeProviderFragment() {
+  const raw = String(globalThis.location?.hash || '').replace(/^#/, '');
+  if (!raw.includes('provider_launch_token=')) return null;
+  const params = new URLSearchParams(raw);
+  const launchToken = params.get('provider_launch_token') || '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(launchToken)) {
+    const error = new Error('Invalid Provider launch token'); error.code = 'PROVIDER_LAUNCH_INVALID'; throw error;
+  }
+  const context = {
+    launchToken,
+    launchId: params.get('provider_launch_id') || '',
+    exchangeId: globalThis.crypto?.randomUUID?.() || `galaga-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  };
+  try {
+    globalThis.history?.replaceState?.(globalThis.history.state, '', `${globalThis.location.pathname}${globalThis.location.search}`);
+  } catch { /* Keep token in module memory only. */ }
+  return context;
+}
+const providerLaunch = consumeProviderFragment();
+const platformLaunch = providerLaunch ? null : consumePlatformFragment();
 const sideSixLaunchPresent = Boolean(searchParams.get('userId') && searchParams.get('ts') && searchParams.get('nonce') && searchParams.get('sig'));
-const launchMarker = platformLaunch
+const launchMarker = providerLaunch
+  ? `PROVIDER:${providerLaunch.launchId || providerLaunch.exchangeId}`
+  : platformLaunch
   ? `PLATFORM:${platformLaunch.launchId || platformLaunch.exchangeId}`
   : sideSixLaunchPresent
     ? `SIDESIX:${searchParams.get('userId')}:${searchParams.get('nonce')}`
@@ -54,10 +75,12 @@ function saveMarker(marker) {
   } catch { /* memory fallback */ }
 }
 
-if (launchMarker && readMarker() && readMarker() !== launchMarker) saveToken(null);
+// Never reuse a local/demo session in a newly-issued Provider launch.
+if (providerLaunch || (launchMarker && readMarker() !== launchMarker)) saveToken(null);
 if (launchMarker) saveMarker(launchMarker);
 
 function launchPayload() {
+  if (providerLaunch) return { providerLaunchToken: providerLaunch.launchToken, exchangeId: providerLaunch.exchangeId };
   if (platformLaunch) return { platformLaunchToken: platformLaunch.launchToken, exchangeId: platformLaunch.exchangeId };
   if (!sideSixLaunchPresent) return null;
   const payload = {};
@@ -82,6 +105,10 @@ export async function ensurePlatformSession(signal) {
   if (existing) { clearSideSixQueryFromAddress(); return existing; }
   const payload = launchPayload();
   if (!payload) {
+    if (readMarker()?.startsWith('PROVIDER:')) {
+      const error = new Error('Provider session expired. Relaunch the game from the operator.');
+      error.code = 'PROVIDER_SESSION_EXPIRED'; error.status = 401; throw error;
+    }
     if (readMarker()?.startsWith('PLATFORM:')) {
       const error = new Error('Platform session expired. Relaunch the game from the Platform.');
       error.code = 'PLATFORM_SESSION_EXPIRED'; error.status = 401; throw error;
@@ -108,4 +135,4 @@ export async function ensurePlatformSession(signal) {
 }
 
 export function clearPlatformSession() { saveToken(null); }
-export function platformLaunchPresent() { return Boolean(platformLaunch || sideSixLaunchPresent); }
+export function platformLaunchPresent() { return Boolean(providerLaunch || platformLaunch || sideSixLaunchPresent); }
