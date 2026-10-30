@@ -27,7 +27,11 @@ async function request(path, options = {}) {
     let payload = null;
     try { payload = await response.json(); } catch { payload = {}; }
     if (!response.ok) {
-      const error = new Error(payload?.error || `Request failed (${response.status})`);
+      const description = typeof payload?.error === 'string' ? payload.error :
+        typeof payload?.error?.message === 'string' ? payload.error.message :
+        typeof payload?.code === 'string' ? payload.code : `Request failed (${response.status})`;
+      const error = new Error(description);
+      error.code = payload?.code || payload?.error?.code || 'GALAGA_API_ERROR';
       error.status = response.status;
       error.payload = payload;
       throw error;

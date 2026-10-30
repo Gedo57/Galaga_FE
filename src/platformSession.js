@@ -20,29 +20,34 @@ function consumePlatformFragment() {
   return context;
 }
 
+const providerRaw = String(globalThis.location?.hash || '').replace(/^#/, '');
+const providerLaunchAttempt = /(?:^|&)(?:provider_launch_token|provider_launch_id)=/.test(providerRaw);
 function consumeProviderFragment() {
-  const raw = String(globalThis.location?.hash || '').replace(/^#/, '');
-  if (!raw.includes('provider_launch_token=')) return null;
-  const params = new URLSearchParams(raw);
+  if (!providerLaunchAttempt) return null;
+  const params = new URLSearchParams(providerRaw);
   const launchToken = params.get('provider_launch_token') || '';
-  if (!/^[A-Za-z0-9_-]{43}$/.test(launchToken)) {
-    const error = new Error('Invalid Provider launch token'); error.code = 'PROVIDER_LAUNCH_INVALID'; throw error;
-  }
-  const context = {
-    launchToken,
-    launchId: params.get('provider_launch_id') || '',
-    exchangeId: globalThis.crypto?.randomUUID?.() || `galaga-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  };
+  const launchId = params.get('provider_launch_id') || '';
+  const valid = [...params.keys()].length === 2 &&
+    params.getAll('provider_launch_token').length === 1 &&
+    params.getAll('provider_launch_id').length === 1 &&
+    /^[A-Za-z0-9_-]{43}$/.test(launchToken) &&
+    /^[A-Za-z0-9_.:-]{8,128}$/.test(launchId);
+  // Invalid tickets must be consumed from history, but never authorize a Demo login.
   try {
     globalThis.history?.replaceState?.(globalThis.history.state, '', `${globalThis.location.pathname}${globalThis.location.search}`);
-  } catch { /* Keep token in module memory only. */ }
-  return context;
+  } catch { /* The ticket stays in memory only if valid. */ }
+  if (!valid) return null;
+  return {
+    launchToken, launchId,
+    exchangeId: globalThis.crypto?.randomUUID?.() || `galaga-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  };
 }
 const providerLaunch = consumeProviderFragment();
-const platformLaunch = providerLaunch ? null : consumePlatformFragment();
+const platformLaunch = providerLaunchAttempt ? null : consumePlatformFragment();
 const sideSixLaunchPresent = Boolean(searchParams.get('userId') && searchParams.get('ts') && searchParams.get('nonce') && searchParams.get('sig'));
 const launchMarker = providerLaunch
   ? `PROVIDER:${providerLaunch.launchId || providerLaunch.exchangeId}`
+  : providerLaunchAttempt ? 'PROVIDER:INVALID'
   : platformLaunch
   ? `PLATFORM:${platformLaunch.launchId || platformLaunch.exchangeId}`
   : sideSixLaunchPresent
@@ -75,8 +80,8 @@ function saveMarker(marker) {
   } catch { /* memory fallback */ }
 }
 
-// Never reuse a local/demo session in a newly-issued Provider launch.
-if (providerLaunch || (launchMarker && readMarker() !== launchMarker)) saveToken(null);
+// Never reuse a local/demo session, including for malformed Provider tokens.
+if (providerLaunchAttempt || (launchMarker && readMarker() !== launchMarker)) saveToken(null);
 if (launchMarker) saveMarker(launchMarker);
 
 function launchPayload() {
@@ -101,6 +106,10 @@ function clearSideSixQueryFromAddress() {
 }
 
 export async function ensurePlatformSession(signal) {
+  if (providerLaunchAttempt && !providerLaunch) {
+    const error = new Error('Invalid Game Provider launch. Return to G Provider and try again.');
+    error.code = 'PROVIDER_LAUNCH_INVALID'; error.status = 401; throw error;
+  }
   const existing = readToken();
   if (existing) { clearSideSixQueryFromAddress(); return existing; }
   const payload = launchPayload();
@@ -135,4 +144,4 @@ export async function ensurePlatformSession(signal) {
 }
 
 export function clearPlatformSession() { saveToken(null); }
-export function platformLaunchPresent() { return Boolean(providerLaunch || platformLaunch || sideSixLaunchPresent); }
+export function platformLaunchPresent() { return Boolean(providerLaunchAttempt || platformLaunch || sideSixLaunchPresent); }

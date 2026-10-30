@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "test:provider:qa": "node scripts/patch109-provider-entry.mjs",
+    "prebuild": "npm run test:provider:qa"
   },
   "devDependencies": {
     "vite": "^7.1.3"
