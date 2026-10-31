@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test:provider:qa": "node scripts/patch109-provider-entry.mjs",
-    "prebuild": "npm run test:provider:qa"
+    "prebuild": "npm run test:provider:qa && npm run test:help",
+    "test:help": "node --test tests/how-to-play.test.mjs"
   },
   "devDependencies": {
     "vite": "^7.1.3"
