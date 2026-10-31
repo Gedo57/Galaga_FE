@@ -9,6 +9,7 @@ import { checkpointMultiplierForDifficulty, performanceRating, scoreGateForDiffi
 import { GameState, StateMachine } from './stateMachine.js';
 
 installHowToPlay({
+  audioSelectors: [".audio-settings-button"],
   title: "Galaga",
   steps: [
   "Choose a difficulty and entry amount.",
