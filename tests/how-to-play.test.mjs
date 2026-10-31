@@ -34,3 +34,34 @@ test('Original tutorial illustrations are preserved for help when applicable',()
     }
   }
 });
+
+test('Help stays beside audio/settings rather than over it in desktop and mobile layouts',()=>{
+  assert.match(entry,/audioSelectors:\s*\[/);
+  assert.match(help,/querySelectorAll\(selector\)/);
+  assert.match(help,/MutationObserver\(schedulePosition\)/);
+  assert.match(help,/addEventListener\('orientationchange', schedulePosition/);
+  const source=help.replace(/^import[^\n]*\n/gm,'').replace(/^export /gm,'');
+  const choose=new Function(source+'\nreturn chooseHelpPlacement;')();
+  const layouts=[
+    {width:1280,height:720,audioRect:{left:1220,top:12,right:1262,bottom:54}},
+    {width:390,height:844,audioRect:{left:328,top:10,right:380,bottom:62}},
+    {width:1280,height:720,audioRect:{left:14,top:14,right:58,bottom:58}},
+    {width:1280,height:720,audioRect:{left:1123,top:12,right:1196,bottom:85}}
+  ];
+  for(const layout of layouts){
+    const buttonWidth=44,buttonHeight=44;
+    const spot=choose({...layout,buttonWidth,buttonHeight});
+    const sound=layout.audioRect;
+    assert.ok(spot.x>=9 && spot.y>=9,'Help must remain on screen');
+    assert.ok(spot.x+buttonWidth<=layout.width-9,'Help must fit screen width');
+    assert.ok(spot.y+buttonHeight<=layout.height-9,'Help must fit screen height');
+    assert.ok(
+      spot.x+buttonWidth<=sound.left-7 || spot.x>=sound.right+7 ||
+      spot.y+buttonHeight<=sound.top-7 || spot.y>=sound.bottom+7,
+      'Help must not overlap the sound/settings button');
+  }
+  const audioRect={left:320,top:12,right:364,bottom:56};
+  const blockedRects=[{left:260,top:0,right:320,bottom:70}];
+  const next=choose({width:390,height:844,buttonWidth:44,buttonHeight:44,audioRect,blockedRects});
+  assert.ok(next.y>=68 || next.x<=253 || next.x>=371,'Avoid nearby game controls');
+});
