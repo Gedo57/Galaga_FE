@@ -34,6 +34,8 @@ export function chooseHelpPlacement({ width, height, buttonWidth = 44, buttonHei
   for (const candidate of candidates) {
     if (candidate.x < edge || candidate.y < edge ||
         candidate.x + buttonWidth > width - edge || candidate.y + buttonHeight > height - edge) continue;
+    // Sound controls have absolute priority, even if the rest of the HUD is crowded.
+    if (audioRect && overlap(candidate, audioRect)) continue;
     const collisions = allBlocked.reduce((count, rect) => count + (overlap(candidate, rect) ? 1 : 0), 0);
     if (collisions === 0) return candidate;
     if (collisions < lowest) { lowest = collisions; best = candidate; }
