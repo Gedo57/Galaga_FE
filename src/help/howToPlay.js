@@ -153,6 +153,8 @@ export function installHowToPlay({ title, steps, tips, slideCount = 0, slidePath
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   };
   let layoutFrame = 0;
+  let layoutTimer = 0;
+  let lastLayoutAt = 0;
   const positionTrigger = () => {
     layoutFrame = 0;
     if (!trigger.isConnected) return;
@@ -185,8 +187,18 @@ export function installHowToPlay({ title, steps, tips, slideCount = 0, slidePath
     trigger.style.setProperty('bottom', 'auto', 'important');
   };
   const schedulePosition = () => {
-    if (layoutFrame) return;
-    layoutFrame = window.requestAnimationFrame(positionTrigger);
+    if (layoutFrame || layoutTimer) return;
+    // Limit layout reads to about 5 per second when gameplay changes many
+    // element classes. Orientation and audio updates still reposition quickly.
+    const remaining = Math.max(0, 180 - (Date.now() - lastLayoutAt));
+    if (remaining > 0) {
+      layoutTimer = window.setTimeout(() => { layoutTimer = 0; schedulePosition(); }, remaining);
+      return;
+    }
+    layoutFrame = window.requestAnimationFrame(() => {
+      lastLayoutAt = Date.now();
+      positionTrigger();
+    });
   };
   window.addEventListener('resize', schedulePosition, { passive: true });
   window.addEventListener('orientationchange', schedulePosition, { passive: true });
