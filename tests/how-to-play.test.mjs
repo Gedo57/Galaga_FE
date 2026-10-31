@@ -63,5 +63,7 @@ test('Help stays beside audio/settings rather than over it in desktop and mobile
   const audioRect={left:320,top:12,right:364,bottom:56};
   const blockedRects=[{left:260,top:0,right:320,bottom:70}];
   const next=choose({width:390,height:844,buttonWidth:44,buttonHeight:44,audioRect,blockedRects});
-  assert.ok(next.y>=68 || next.x<=253 || next.x>=371,'Avoid nearby game controls');
+  assert.ok(next.x+44<=blockedRects[0].left-7 || next.x>=blockedRects[0].right+7 ||
+    next.y+44<=blockedRects[0].top-7 || next.y>=blockedRects[0].bottom+7,
+    'Help must not cover adjacent game controls');
 });
