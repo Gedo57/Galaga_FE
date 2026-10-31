@@ -1,11 +1,52 @@
 import './howToPlay.css';
 
 /**
+ * Choose a fixed-position help button that does not cover visible controls.
+ * Side-by-side with the current sound/settings button is preferred on every
+ * viewport; fallback positions are checked against other interactive buttons.
+ */
+export function chooseHelpPlacement({ width, height, buttonWidth = 44, buttonHeight = 44, audioRect = null, blockedRects = [] }) {
+  const gap = 12, edge = 9;
+  const candidates = [];
+  const offer = (x, y) => { if (Number.isFinite(x) && Number.isFinite(y)) candidates.push({ x, y }); };
+  if (audioRect) {
+    const midY = audioRect.top + (audioRect.bottom - audioRect.top - buttonHeight) / 2;
+    const midX = audioRect.left + (audioRect.right - audioRect.left - buttonWidth) / 2;
+    // On a right-aligned audio icon, the right side may be available (Ship);
+    // otherwise put Help immediately to its left (Pinball, Tower, etc.).
+    offer(audioRect.right + gap, midY);
+    offer(audioRect.left - gap - buttonWidth, midY);
+    offer(midX, audioRect.bottom + gap);
+    offer(midX, audioRect.top - gap - buttonHeight);
+  }
+  for (const y of [edge, 64, 120]) {
+    offer(width - edge - buttonWidth, y);
+    offer(edge, y);
+  }
+  for (const y of [height - edge - buttonHeight, height - 72 - buttonHeight]) {
+    offer(width - edge - buttonWidth, y);
+    offer(edge, y);
+  }
+  const allBlocked = audioRect ? [...blockedRects, audioRect] : blockedRects;
+  const overlap = (a, b) => a.x < b.right + 7 && a.x + buttonWidth > b.left - 7 &&
+    a.y < b.bottom + 7 && a.y + buttonHeight > b.top - 7;
+  let best = null, lowest = Infinity;
+  for (const candidate of candidates) {
+    if (candidate.x < edge || candidate.y < edge ||
+        candidate.x + buttonWidth > width - edge || candidate.y + buttonHeight > height - edge) continue;
+    const collisions = allBlocked.reduce((count, rect) => count + (overlap(candidate, rect) ? 1 : 0), 0);
+    if (collisions === 0) return candidate;
+    if (collisions < lowest) { lowest = collisions; best = candidate; }
+  }
+  return best || { x: Math.max(edge, width - edge - buttonWidth), y: edge };
+}
+
+/**
  * Persistent, presentation-only help control.
  * Deliberately does not navigate, change gameplay state or call wallet APIs.
  * Existing illustrated tutorials are reused by providing their slide paths.
  */
-export function installHowToPlay({ title, steps, tips, slideCount = 0, slidePath } = {}) {
+export function installHowToPlay({ title, steps, tips, slideCount = 0, slidePath, audioSelectors = [] } = {}) {
   if (!document.body || document.getElementById('gp-how-to-play-trigger')) return;
   if (typeof title !== 'string' || !Array.isArray(steps) || !Array.isArray(tips) ||
       steps.length === 0 || tips.length === 0) throw new TypeError('How to Play content is required');
@@ -90,6 +131,73 @@ export function installHowToPlay({ title, steps, tips, slideCount = 0, slidePath
   dialog.append(footer);
   backdrop.append(dialog);
   document.body.append(trigger, backdrop);
+
+  // The original fixed top-right location overlapped sound buttons and native
+  // game controls. Query the *currently visible* sound/settings button instead.
+  // This also handles React remounts, SPA screen changes and device rotation.
+  const selectors = Array.isArray(audioSelectors) ? audioSelectors.filter(Boolean) : [];
+  const selector = selectors.join(',');
+  const isVisibleControl = (element) => {
+    if (!element?.isConnected || element === trigger || element.closest('.gp-help-backdrop')) return false;
+    if (element.closest('[hidden],[aria-hidden="true"]')) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    const r = element.getBoundingClientRect();
+    return r.width >= 12 && r.height >= 12 && r.left < window.innerWidth &&
+      r.right > 0 && r.top < window.innerHeight && r.bottom > 0;
+  };
+  const rectangle = (element) => {
+    const r = element.getBoundingClientRect();
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+  };
+  let layoutFrame = 0;
+  const positionTrigger = () => {
+    layoutFrame = 0;
+    if (!trigger.isConnected) return;
+    const openAudio = document.querySelector(
+      '.audio-settings.is-open, .global-audio-controls.is-open, ' +
+      '.audio-settings-overlay.is-open, .settings-overlay.is-open, ' +
+      '.desktop-menu-settings-panel, .mobile-menu-settings-panel'
+    );
+    // Do not cover an expanded native sound/settings panel.
+    const audioPanelOpen = Boolean(openAudio && isVisibleControl(openAudio));
+    trigger.style.setProperty('visibility', audioPanelOpen ? 'hidden' : 'visible', 'important');
+    const audio = selector
+      ? [...document.querySelectorAll(selector)].find(isVisibleControl)
+      : null;
+    const blocked = [...document.querySelectorAll('button, [role="button"], input[type="button"]')]
+      .filter(node => node !== trigger && isVisibleControl(node))
+      .map(rectangle);
+    const rect = trigger.getBoundingClientRect();
+    const pos = chooseHelpPlacement({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      buttonWidth: rect.width || 44,
+      buttonHeight: rect.height || 44,
+      audioRect: audio ? rectangle(audio) : null,
+      blockedRects: blocked
+    });
+    trigger.style.setProperty('left', Math.round(pos.x) + 'px', 'important');
+    trigger.style.setProperty('right', 'auto', 'important');
+    trigger.style.setProperty('top', Math.round(pos.y) + 'px', 'important');
+    trigger.style.setProperty('bottom', 'auto', 'important');
+  };
+  const schedulePosition = () => {
+    if (layoutFrame) return;
+    layoutFrame = window.requestAnimationFrame(positionTrigger);
+  };
+  window.addEventListener('resize', schedulePosition, { passive: true });
+  window.addEventListener('orientationchange', schedulePosition, { passive: true });
+  document.addEventListener('fullscreenchange', schedulePosition);
+  // Child replacement is common in Galaga and Whack; class/hidden changes are
+  // common in the other games. Never observe our own inline style mutations.
+  const audioLayoutObserver = new MutationObserver(schedulePosition);
+  audioLayoutObserver.observe(document.body, {
+    childList: true, subtree: true, attributes: true,
+    attributeFilter: ['class', 'hidden', 'aria-hidden', 'data-state', 'data-page']
+  });
+  schedulePosition();
+
 
   let returnFocus = null;
   function close() {
