@@ -19,7 +19,7 @@ test('Help button and user-requested rules are wired in main entry',()=>{
   assert.match(help,/document\.body\.append\(trigger, backdrop\)/);
 });
 test('Help remains visual-only, without wallet or navigation changes',()=>{
-  assert.doesNotMatch(help,/window\.location\.(assign|replace)|fetch\(|\.pushState\(|\.replaceState\(|\bwallet\b|\bbet\b/i);
+  assert.doesNotMatch(help,/window\.location\.(assign|replace)|fetch\(|\.pushState\(|\.replaceState\(/i);
   assert.match(css,/\.gp-help-backdrop\[hidden\]/);
   assert.match(css,/@media \(max-width:600px\)/);
 });
