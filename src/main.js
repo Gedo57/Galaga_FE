@@ -1,3 +1,4 @@
+import { installHowToPlay } from './help/howToPlay.js';
 import './styles.css';
 import { api } from './api.js';
 import { audioManager } from './audioManager.js';
@@ -6,6 +7,20 @@ import { CoreGameplayEngine } from './gameEngine.js';
 import { gameplayAssetKeysForWave, preloadGameplayAssetsForWave, retainGameplayAssetsForWave } from './assetCache.js';
 import { checkpointMultiplierForDifficulty, performanceRating, scoreGateForDifficulty, startMultiplierForDifficulty, waveDefinition } from './waveConfig.js';
 import { GameState, StateMachine } from './stateMachine.js';
+
+installHowToPlay({
+  title: "Galaga",
+  steps: [
+  "Choose a difficulty and entry amount.",
+  "Move your spaceship and shoot incoming enemies.",
+  "Dodge attacks and survive waves, minibosses and bosses.",
+  "At a cash-out checkpoint, decide whether to collect or continue."
+],
+  tips: [
+  "Keep moving to avoid incoming shots.",
+  "A longer run is harder—cash out when you're happy with your progress."
+]
+});
 
 const app = document.querySelector('#app');
 const machine = new StateMachine(GameState.MENU);
