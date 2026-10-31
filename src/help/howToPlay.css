@@ -1,0 +1,69 @@
+/* Game-agnostic floating help. This stylesheet affects only gp-help-* elements. */
+.gp-help-trigger{
+  position:fixed!important;top:calc(14px + env(safe-area-inset-top, 0px))!important;
+  right:calc(14px + env(safe-area-inset-right, 0px))!important;
+  z-index:2147483000!important;display:grid!important;place-items:center!important;
+  width:46px!important;height:46px!important;min-width:46px!important;min-height:46px!important;
+  padding:0!important;margin:0!important;border:2px solid rgba(255,232,158,.95)!important;
+  border-radius:50%!important;background:rgba(15,20,43,.95)!important;
+  box-shadow:0 2px 16px rgba(0,0,0,.46)!important;color:#fff7ca!important;
+  font:800 28px/1 system-ui,sans-serif!important;cursor:pointer!important;
+  touch-action:manipulation!important;transform:none!important;opacity:1!important;
+  -webkit-tap-highlight-color:transparent!important;
+}
+.gp-help-trigger:focus-visible,.gp-help-dialog button:focus-visible{outline:3px solid #83e8ff!important;outline-offset:3px!important}
+.gp-help-backdrop[hidden]{display:none!important}
+.gp-help-backdrop{
+  position:fixed!important;inset:0!important;z-index:2147483001!important;
+  display:grid!important;place-items:center!important;padding:16px!important;
+  background:rgba(2,4,14,.82)!important;backdrop-filter:blur(6px);
+  overflow:auto!important;overscroll-behavior:contain!important;
+  box-sizing:border-box!important;
+}
+.gp-help-backdrop,.gp-help-backdrop *{box-sizing:border-box!important}
+.gp-help-dialog{
+  position:relative!important;display:block!important;
+  width:min(100%,760px)!important;max-height:min(90dvh,820px)!important;
+  overflow-y:auto!important;overscroll-behavior:contain!important;
+  margin:auto!important;padding:clamp(18px,3vw,30px)!important;
+  border:1px solid rgba(255,215,128,.65)!important;border-radius:20px!important;
+  background:linear-gradient(148deg,#1a2647,#101526 72%)!important;
+  box-shadow:0 16px 64px rgba(0,0,0,.66)!important;
+  color:#f9fafb!important;text-align:left!important;
+  font:400 15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
+  touch-action:pan-y!important;
+}
+.gp-help-header{display:flex!important;justify-content:space-between!important;align-items:center!important;gap:16px!important}
+.gp-help-title{font:800 clamp(22px,4vw,30px)/1.2 system-ui,sans-serif!important;margin:0!important;color:#fff7d4!important}
+.gp-help-close,.gp-help-nav-button{
+  display:inline-flex!important;justify-content:center!important;align-items:center!important;
+  border:1px solid #96a2c0!important;border-radius:10px!important;
+  background:#2c3b60!important;color:white!important;
+  cursor:pointer!important;min-height:42px!important;padding:8px 16px!important;
+  font:700 14px/1.3 system-ui,sans-serif!important;
+}
+.gp-help-close{font-size:26px!important;width:44px!important;padding:0!important;flex:none!important}
+.gp-help-nav-button:disabled{opacity:.38!important;cursor:default!important}
+.gp-help-game-title{margin:4px 0 18px!important;color:#b9cdec!important;font-size:13px!important}
+.gp-help-section-title{margin:18px 0 9px!important;font:800 17px/1.3 system-ui,sans-serif!important;color:#ffd888!important}
+.gp-help-list{margin:0!important;padding-left:24px!important;color:#f0f2ff!important;list-style-position:outside!important}
+.gp-help-list li{display:list-item!important;margin:7px 0!important;padding:0!important;white-space:normal!important}
+.gp-help-list li::marker{color:#ffc96a!important}
+.gp-help-footer{margin:19px 0 0!important;border-top:1px solid #44506b!important;padding-top:13px!important;color:#b8c6da!important;font-size:12px!important}
+.gp-help-slide-box{display:flex!important;justify-content:center!important;align-items:center!important;
+  width:100%!important;max-height:min(52dvh,490px)!important;min-height:120px!important;
+  background:#090d1b!important;border-radius:12px!important;overflow:hidden!important}
+.gp-help-slide-image{display:block!important;max-width:100%!important;max-height:min(52dvh,490px)!important;
+  height:auto!important;width:auto!important;object-fit:contain!important;margin:auto!important}
+.gp-help-slide-nav{display:flex!important;align-items:center!important;justify-content:space-between!important;
+  gap:8px!important;margin:12px 0 4px!important}
+.gp-help-slide-label{color:#f0e4c0!important;font-size:13px!important}
+@media (max-width:600px){
+ .gp-help-trigger{width:44px!important;height:44px!important;min-width:44px!important;min-height:44px!important;
+  top:calc(8px + env(safe-area-inset-top, 0px))!important;right:calc(8px + env(safe-area-inset-right, 0px))!important}
+ .gp-help-backdrop{padding:8px!important}
+ .gp-help-dialog{max-height:92dvh!important;border-radius:14px!important;padding:18px!important;font-size:14px!important}
+ .gp-help-section-title{font-size:16px!important}
+ .gp-help-slide-box,.gp-help-slide-image{max-height:46dvh!important}
+}
+@media (prefers-reduced-motion:reduce){.gp-help-backdrop{backdrop-filter:none}}
